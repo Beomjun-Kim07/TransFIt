@@ -122,10 +122,13 @@ def main():
     now = datetime.now(KST)
     today = now.date()
     weekday = today.weekday()  # 월=0
-    routes = sb_get("routes", {"select": "*"})
+    routes = sb_get("routes", {"select": "*,users(telegram_chat_id)"})
     print(f"[{now:%Y-%m-%d %H:%M}] routes={len(routes)} TEST={TEST}")
 
     for route in routes:
+        chat_id = (route.get("users") or {}).get("telegram_chat_id")
+        if not chat_id:
+            print(f"  route {route['id']}: 텔레그램 미연결"); continue
         days = route.get("active_days") or "MTWTF"
         active = weekday < len(days) and days[weekday] != "-"
         if not active and not TEST:
@@ -146,7 +149,7 @@ def main():
 
         if TEST:
             lines = live_lines(segments, now)
-            send(route["user_id"], head + "\n(테스트 실행)" + ("\n" + "\n".join(lines) if lines else ""))
+            send(chat_id, head + "\n(테스트 실행)" + ("\n" + "\n".join(lines) if lines else ""))
             print("    TEST 발송"); continue
 
         # 알림 1: 출발 lead_min 전 구간
@@ -158,7 +161,7 @@ def main():
                 # ignore-duplicates라 새로 들어갔는지 알 수 없어 sent_at으로 판정: 방금 생긴 행이면 보낸다
                 sent_at = datetime.fromisoformat(already[0]["sent_at"].replace("Z", "+00:00"))
                 if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
-                    send(route["user_id"], head + f"\n{lead}분 뒤 출발이에요.")
+                    send(chat_id, head + f"\n{lead}분 뒤 출발이에요.")
                     print("    pre 발송")
             except Exception as e:
                 print("    pre 실패:", e)
@@ -172,7 +175,7 @@ def main():
                 sent_at = datetime.fromisoformat(already[0]["sent_at"].replace("Z", "+00:00"))
                 if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
                     lines = live_lines(segments, now)
-                    send(route["user_id"], head + "\n지금 나갈 시간이에요." + ("\n" + "\n".join(lines) if lines else ""))
+                    send(chat_id, head + "\n지금 나갈 시간이에요." + ("\n" + "\n".join(lines) if lines else ""))
                     print("    live 발송")
             except Exception as e:
                 print("    live 실패:", e)

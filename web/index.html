@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TransFit</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --fg:#e8eaf0; --muted:#8b93a5; --accent:#4f8cff;
+          --walk:#8b93a5; --subway:#4f8cff; --transfer:#f5a623; --bus:#3dc26b; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 -apple-system, "Pretendard", "Noto Sans KR", sans-serif }
+  main { max-width:520px; margin:0 auto; padding:16px }
+  h1 { font-size:22px; margin:8px 0 16px } h2 { font-size:16px; margin:0 0 10px; color:var(--muted) }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:14px }
+  input, select, button { font:inherit; border-radius:10px; border:1px solid var(--line); background:#11141a; color:var(--fg); padding:10px 12px }
+  input, select { width:100% }
+  button { cursor:pointer } button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600 }
+  button.ghost { background:transparent } button:disabled { opacity:.4; cursor:default }
+  .row { display:flex; gap:8px; align-items:center } .row > * { flex:1 } .col { display:flex; flex-direction:column; gap:8px }
+  .big { font-size:34px; font-weight:700; letter-spacing:-1px }
+  .bar { display:flex; height:14px; border-radius:7px; overflow:hidden; margin:10px 0 } .bar div { min-width:3px }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 12px; font-size:13px; color:var(--muted) }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:5px; margin-right:4px; vertical-align:middle }
+  .muted { color:var(--muted); font-size:14px }
+  .seg { border-top:1px solid var(--line); padding:8px 0; font-size:14px }
+  .hidden { display:none }
+  .steps button { width:100%; padding:14px; font-size:17px; margin-top:8px }
+  .log { font-size:13px; color:var(--muted); white-space:pre-wrap }
+  a { color:var(--accent) }
+</style>
+</head>
+<body>
+<main>
+  <h1>TransFit</h1>
+
+  <!-- 로그인 -->
+  <section id="auth" class="card">
+    <h2>로그인</h2>
+    <div class="col">
+      <input id="email" type="email" placeholder="이메일" autocomplete="email">
+      <input id="password" type="password" placeholder="비밀번호 (6자 이상)" autocomplete="current-password">
+      <div class="row">
+        <button class="primary" onclick="signIn()">로그인</button>
+        <button onclick="signUp()">가입</button>
+      </div>
+      <div id="authMsg" class="muted"></div>
+    </div>
+  </section>
+
+  <!-- 앱 본체 -->
+  <section id="app" class="hidden">
+    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+      <span id="who" class="muted"></span>
+      <button class="ghost" style="flex:0" onclick="signOut()">로그아웃</button>
+    </div>
+
+    <div class="card" id="tgCard">
+      <h2>텔레그램 알림</h2>
+      <div id="tgBody"></div>
+    </div>
+
+    <div class="card">
+      <h2>내 경로</h2>
+      <div id="routeList" class="col"></div>
+      <button class="ghost" style="margin-top:10px" onclick="toggleNewRoute()">+ 새 경로</button>
+      <div id="newRoute" class="col hidden" style="margin-top:10px">
+        <div class="row"><input id="rFrom" placeholder="출발 (예: 노원역)"><input id="rTo" placeholder="도착 (예: 연세대학교 정문)"></div>
+        <div class="row"><input id="rArrive" type="time" value="09:00"><input id="rDays" placeholder="요일 MTWTF-- (- 는 쉬는 날)" value="MTWTF--"></div>
+        <button class="primary" onclick="findRoutes()">경로 찾기</button>
+        <div id="routeOptions" class="col"></div>
+        <div id="findMsg" class="muted"></div>
+      </div>
+    </div>
+
+    <div id="routeView" class="hidden">
+      <div class="card">
+        <h2 id="rvName"></h2>
+        <div class="muted">도착 목표 <b id="rvArrive"></b></div>
+        <div class="big" id="rvDepart">--:--</div>
+        <div class="muted" id="rvBasis"></div>
+        <div class="bar" id="rvBar"></div>
+        <div class="legend" id="rvLegend"></div>
+        <div id="rvSegs"></div>
+        <details style="margin-top:10px"><summary class="muted">구간 추가</summary>
+          <div class="col" style="margin-top:8px">
+            <select id="sKind">
+              <option value="walk">도보</option><option value="subway">지하철</option>
+              <option value="transfer">환승 도보</option><option value="bus">버스</option>
+            </select>
+            <div class="row"><input id="sFrom" placeholder="출발 (역/장소)"><input id="sTo" placeholder="도착 (역/장소)"></div>
+            <div class="row"><input id="sLine" placeholder="노선 (예: 4호선)"><input id="sUpdn" placeholder="방향 (상행/하행/내선/외선)"></div>
+            <div class="row"><input id="sDist" type="number" placeholder="도보 거리 m"><input id="sMin" type="number" placeholder="예상 분"></div>
+            <div class="muted">도보는 거리만 넣으면 3.7 km/h로 분을 계산해요. 네이버와 같은 기준에서 시작해 내 기록으로 바뀝니다.</div>
+            <button class="primary" onclick="addSegment()">구간 추가</button>
+          </div>
+        </details>
+      </div>
+
+      <div class="card steps">
+        <h2>오늘 기록</h2>
+        <div id="tripState" class="muted"></div>
+        <button class="primary" id="btnStart" onclick="mark('start')">🏠 집 출발</button>
+        <button id="btnPlatform" onclick="mark('platform_at')">🚉 승강장 도착</button>
+        <button id="btnBoard" onclick="mark('boarded_at')">🚇 열차 탑승</button>
+        <button id="btnToff" onclick="mark('transfer_off_at')">↘ 환승역 하차</button>
+        <button id="btnTon" onclick="mark('transfer_on_at')">↗ 환승 열차 탑승</button>
+        <button id="btnEnd" onclick="mark('ended_at')">🎯 도착</button>
+        <button class="ghost" id="btnCancel" onclick="cancelTrip()">기록 취소</button>
+      </div>
+
+      <div class="card">
+        <h2>최근 기록</h2>
+        <div id="tripList" class="log"></div>
+      </div>
+    </div>
+  </section>
+  <p class="muted" style="text-align:center;margin-top:24px">데이터: 서울열린데이터광장 · 공공데이터포털(서울특별시) · 카카오</p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script>
+const C = window.TRANSFIT;
+const sb = supabase.createClient(C.SUPABASE_URL, C.SUPABASE_ANON_KEY);
+const WALK_KMH = 3.7, MIN_SAMPLES = 5;
+const KIND = { walk:["도보","--walk"], subway:["지하철","--subway"], transfer:["환승","--transfer"], bus:["버스","--bus"] };
+let user = null, routes = [], current = null, segments = [], trips = [], openTrip = null;
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2,"0");
+const hhmm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+// ---------- 로그인 ----------
+async function signIn() {
+  const { error } = await sb.auth.signInWithPassword({ email: $("email").value, password: $("password").value });
+  $("authMsg").textContent = error ? "로그인 실패: " + error.message : "";
+}
+async function signUp() {
+  const { error } = await sb.auth.signUp({ email: $("email").value, password: $("password").value });
+  $("authMsg").textContent = error ? "가입 실패: " + error.message : "가입됐어요. 로그인 중…";
+}
+async function signOut() { await sb.auth.signOut(); }
+sb.auth.onAuthStateChange((_, session) => { user = session?.user || null; render(); });
+
+// ---------- 화면 ----------
+async function render() {
+  $("auth").classList.toggle("hidden", !!user);
+  $("app").classList.toggle("hidden", !user);
+  if (!user) return;
+  $("who").textContent = user.email;
+  await loadTelegram();
+  await loadRoutes();
+}
+async function loadTelegram() {
+  const { data } = await sb.from("users").select("telegram_chat_id, link_code").eq("id", user.id).single();
+  if (data?.telegram_chat_id) {
+    $("tgBody").innerHTML = `<div>✅ 연결됨. 출발 시각 알림이 텔레그램으로 와요.</div>`;
+  } else {
+    const link = `https://t.me/${C.BOT_USERNAME}?start=${data?.link_code || ""}`;
+    $("tgBody").innerHTML = `<div class="muted">알림을 받으려면 텔레그램 봇을 한 번 연결해요.</div>
+      <a href="${link}" target="_blank"><button class="primary" style="width:100%;margin-top:8px">텔레그램 연결하기</button></a>
+      <div class="muted" style="margin-top:6px">열리는 대화방에서 <b>시작</b>을 누르면 끝. 연결 후 이 페이지를 새로고침하세요.</div>`;
+  }
+}
+async function loadRoutes() {
+  const { data } = await sb.from("routes").select("*").order("id");
+  routes = data || [];
+  $("routeList").innerHTML = routes.length ? routes.map(r =>
+    `<button class="${current?.id===r.id?'primary':''}" onclick="selectRoute(${r.id})" style="text-align:left">${r.name} <span class="muted">· ${r.arrive_by.slice(0,5)} 도착</span></button>`).join("")
+    : `<div class="muted">아직 경로가 없어요. 아래에서 만들어요.</div>`;
+  if (current) await selectRoute(current.id); else $("routeView").classList.add("hidden");
+}
+function toggleNewRoute() { $("newRoute").classList.toggle("hidden"); }
+const KSTEP = { WALKING:["walk","도보"], SUBWAY:["subway","지하철"], BUS:["bus","버스"] };
+let found = null;
+async function findRoutes() {
+  $("findMsg").textContent = "카카오 길찾기 조회 중…"; $("routeOptions").innerHTML = "";
+  const { data, error } = await sb.functions.invoke("route", { body: { from: $("rFrom").value, to: $("rTo").value } });
+  if (error || data?.error) { $("findMsg").textContent = "실패: " + (data?.error || error.message); return; }
+  found = data;
+  $("findMsg").textContent = `${data.from.name} → ${data.to.name} · 경로 ${data.routes.length}개`;
+  $("routeOptions").innerHTML = data.routes.slice(0, 6).map((r, i) => {
+    const total = r.steps.reduce((a, st) => a + (st.time || 0), 0) || 1;
+    const bar = r.steps.map(st => `<div style="flex:${st.time||1};background:var(--${KSTEP[st.type]?.[0]||'walk'})"></div>`).join("");
+    const steps = r.steps.map(st => st.type === "WALKING" ? `도보 ${Math.round(st.time/60)}분`
+        : `${st.line||KSTEP[st.type][1]} ${st.from||""}→${st.to||""} ${Math.round(st.time/60)}분`).join(" · ");
+    return `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between"><b>${Math.round(r.totalTime/60)}분</b><span class="muted">환승 ${r.transfers} · ${r.fare?.toLocaleString?.()||r.fare||""}원</span></div>
+      <div class="bar">${bar}</div><div class="muted" style="font-size:13px">${steps}</div>
+      <button class="primary" style="width:100%;margin-top:8px" onclick="saveRoute(${i})">이 경로로 저장</button></div>`;
+  }).join("");
+}
+async function saveRoute(i) {
+  const r = found.routes[i];
+  const { data: route, error } = await sb.from("routes").insert({ user_id: user.id,
+    name: `${found.from.name} → ${found.to.name}`, arrive_by: $("rArrive").value,
+    active_days: $("rDays").value || "MTWTF--", baseline_sec: r.totalTime }).select().single();
+  if (error) return alert(error.message);
+  const rows = []; let prevTransit = false;
+  r.steps.forEach((st, idx) => {
+    let kind = KSTEP[st.type]?.[0] || "walk";
+    const nextTransit = r.steps[idx+1] && r.steps[idx+1].type !== "WALKING";
+    if (kind === "walk" && prevTransit && nextTransit) kind = "transfer";   // 교통수단 사이의 도보 = 환승
+    const walkSec = st.distance ? Math.round(st.distance / 1000 / WALK_KMH * 3600) : st.time;  // 도보는 3.7km/h 기준에서 시작
+    rows.push({ route_id: route.id, seq: idx+1, kind,
+      station_from: st.from || (idx === 0 ? found.from.name : null), station_to: st.to || (idx === r.steps.length-1 ? found.to.name : null),
+      line: st.line, updn: null, distance_m: st.distance || null,
+      expected_sec: (kind === "walk" || kind === "transfer") ? walkSec : st.time });
+    prevTransit = st.type !== "WALKING";
+  });
+  const { error: e2 } = await sb.from("segments").insert(rows);
+  if (e2) return alert(e2.message);
+  $("newRoute").classList.add("hidden"); $("routeOptions").innerHTML = ""; current = route; await loadRoutes();
+}
+async function selectRoute(id) {
+  current = routes.find(r => r.id === id); if (!current) return;
+  $("routeView").classList.remove("hidden");
+  const s = await sb.from("segments").select("*").eq("route_id", id).order("seq"); segments = s.data || [];
+  const t = await sb.from("trips").select("*").eq("route_id", id).order("started_at", { ascending:false }).limit(60); trips = t.data || [];
+  openTrip = trips.find(x => !x.ended_at && (Date.now() - new Date(x.started_at)) < 3*3600e3) || null;
+  renderRoute(); renderTrip();
+  document.querySelectorAll("#routeList button").forEach(b => b.classList.toggle("primary", b.textContent.startsWith(current.name)));
+}
+function quantile(v, p) { v = [...v].sort((a,b)=>a-b); if (!v.length) return null; const pos=(v.length-1)*p, lo=Math.floor(pos), hi=Math.ceil(pos); return v[lo]+(v[hi]-v[lo])*(pos-lo); }
+function estimate() {
+  const durs = trips.filter(t=>t.ended_at).map(t=>(new Date(t.ended_at)-new Date(t.started_at))/1000).filter(d=>d>=180&&d<=3*3600);
+  if (durs.length >= MIN_SAMPLES) return [quantile(durs, current.confidence/100), `내 기록 ${durs.length}회의 ${current.confidence}% 기준`];
+  const sum = segments.reduce((a,s)=>a+(s.expected_sec||0),0);
+  if (current.baseline_sec) return [current.baseline_sec, `기준 경로 · 기록 ${durs.length}/${MIN_SAMPLES}회`];
+  if (sum) return [sum, `구간 예상치 합 · 기록 ${durs.length}/${MIN_SAMPLES}회`];
+  return [current.fallback_min*60, "기본 소요시간"];
+}
+function renderRoute() {
+  $("rvName").textContent = current.name; $("rvArrive").textContent = current.arrive_by.slice(0,5);
+  const [dur, basis] = estimate();
+  const [h,m] = current.arrive_by.split(":").map(Number);
+  const arrive = new Date(); arrive.setHours(h,m,0,0);
+  $("rvDepart").textContent = hhmm(new Date(arrive - dur*1000)) + " 출발";
+  $("rvBasis").textContent = `소요 ${Math.round(dur/60)}분 — ${basis}`;
+  const total = segments.reduce((a,s)=>a+(s.expected_sec||0),0) || 1;
+  $("rvBar").innerHTML = segments.map(s=>`<div style="flex:${s.expected_sec||1};background:var(${KIND[s.kind][1]})"></div>`).join("");
+  $("rvLegend").innerHTML = Object.entries(KIND).map(([k,[n,c]])=>`<span><i class="dot" style="background:var(${c})"></i>${n}</span>`).join("");
+  $("rvSegs").innerHTML = segments.map(s=>`<div class="seg"><i class="dot" style="background:var(${KIND[s.kind][1]})"></i>
+    <b>${KIND[s.kind][0]}</b> ${s.station_from||""} → ${s.station_to||""} ${s.line?`· ${s.line} ${s.updn||""}`:""}
+    <span class="muted">· ${Math.round((s.expected_sec||0)/60)}분${s.distance_m?` (${s.distance_m}m)`:""}</span>
+    <button class="ghost" style="float:right;padding:2px 8px" onclick="delSegment(${s.id})">✕</button></div>`).join("") || `<div class="muted">구간을 추가하면 네이버처럼 막대가 생겨요.</div>`;
+}
+async function addSegment() {
+  const kind = $("sKind").value, dist = Number($("sDist").value)||null; let min = Number($("sMin").value)||null;
+  if (kind==="walk" && dist && !min) min = Math.round(dist / 1000 / WALK_KMH * 60);   // 네이버와 같은 3.7 km/h 기준
+  const { error } = await sb.from("segments").insert({ route_id: current.id, seq: segments.length+1, kind,
+    station_from: $("sFrom").value||null, station_to: $("sTo").value||null, line: $("sLine").value||null,
+    updn: $("sUpdn").value||null, distance_m: dist, expected_sec: min ? min*60 : null });
+  if (error) return alert(error.message);
+  ["sFrom","sTo","sLine","sUpdn","sDist","sMin"].forEach(i=>$(i).value=""); await selectRoute(current.id);
+}
+async function delSegment(id) { await sb.from("segments").delete().eq("id", id); await selectRoute(current.id); }
+
+// ---------- 기록 ----------
+function renderTrip() {
+  const on = !!openTrip;
+  $("btnStart").disabled = on; $("btnCancel").disabled = !on;
+  for (const [btn, field, prev] of [["btnPlatform","platform_at",null],["btnBoard","boarded_at","platform_at"],
+       ["btnToff","transfer_off_at","boarded_at"],["btnTon","transfer_on_at","transfer_off_at"],["btnEnd","ended_at",null]])
+    $(btn).disabled = !on || !!openTrip?.[field];
+  $("tripState").textContent = on ? `진행 중 · ${hhmm(new Date(openTrip.started_at))} 출발` : "오늘 통학을 시작하면 '집 출발'을 눌러요. 실내에서는 버튼으로, 실외는 나중에 자동으로.";
+  const done = trips.filter(t=>t.ended_at).slice(0,10);
+  $("tripList").textContent = done.map(t=>{
+    const d = new Date(t.started_at), mins = Math.round((new Date(t.ended_at)-d)/60000);
+    const walk = t.platform_at ? ` 역까지 ${Math.round((new Date(t.platform_at)-d)/60000)}분` : "";
+    const tr = t.transfer_off_at && t.transfer_on_at ? ` 환승 ${Math.round((new Date(t.transfer_on_at)-new Date(t.transfer_off_at))/60000)}분` : "";
+    return `${d.getMonth()+1}/${d.getDate()} ${hhmm(d)} 출발 · 총 ${mins}분${walk}${tr}`;
+  }).join("\n") || "아직 기록이 없어요.";
+}
+async function mark(what) {
+  const now = new Date().toISOString();
+  if (what === "start") {
+    const { data, error } = await sb.from("trips").insert({ user_id: user.id, route_id: current.id, started_at: now, source: "web",
+      expected_sec: estimate()[0], walk_expected_sec: segments.find(s=>s.kind==="walk")?.expected_sec||null }).select().single();
+    if (error) return alert(error.message);
+  } else {
+    const { error } = await sb.from("trips").update({ [what]: now }).eq("id", openTrip.id);
+    if (error) return alert(error.message);
+  }
+  await selectRoute(current.id);
+}
+async function cancelTrip() { if (openTrip && confirm("이 기록을 지울까요?")) { await sb.from("trips").delete().eq("id", openTrip.id); await selectRoute(current.id); } }
+</script>
+</body>
+</html>
