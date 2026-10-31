@@ -6,7 +6,12 @@
 <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="TransFit">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <title>TransFit</title>
 <style>
   /* iOS 시스템 색 (라이트/다크). 강조색 하나 + 위험색, 교통 색은 노선 공식 색만 */
@@ -152,6 +157,15 @@
   .toast { position:fixed; left:50%; bottom:calc(92px + env(safe-area-inset-bottom)); z-index:50; transform:translate(-50%, 10px); opacity:0; pointer-events:none;
            background:var(--bar); -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); box-shadow:0 4px 20px rgba(0,0,0,.15); padding:11px 18px; border-radius:999px; font-size:15px; font-weight:600; transition:.2s }
   .toast.on { opacity:1; transform:translate(-50%, 0) }
+  /* 홈 화면에 추가 안내 (탭바 위, 로그인 화면에선 맨 아래) */
+  .install { position:fixed; z-index:25; left:8px; right:8px; bottom:calc(8px + env(safe-area-inset-bottom)); max-width:584px; margin:0 auto;
+             display:flex; align-items:center; gap:12px; padding:10px 6px 10px 12px; border-radius:14px; font-size:15px; line-height:1.35;
+             background:var(--bar); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px); box-shadow:0 6px 24px rgba(0,0,0,.16) }
+  body.authed .install { bottom:calc(58px + env(safe-area-inset-bottom)) }
+  body.has-install .wrap { padding-bottom:calc(170px + env(safe-area-inset-bottom)) }
+  .install img { width:40px; height:40px; border-radius:9px; flex:0 0 auto }
+  .install .share { width:18px; height:18px; vertical-align:-3px; fill:none; stroke:var(--accent); stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round }
+  .install .btn { width:auto; min-height:36px; padding:0 14px; border-radius:18px; font-size:15px; flex:0 0 auto }
 
   /* 로그인 */
   .auth { min-height:100vh; max-width:440px; margin:0 auto; display:flex; flex-direction:column; justify-content:center;
@@ -278,6 +292,13 @@
   </div>
 </div>
 <div id="toast" class="toast" role="status"></div>
+<div id="install" class="install hidden" role="region" aria-label="앱 설치 안내">
+  <img src="apple-touch-icon.png" alt="">
+  <div class="grow" id="installText"></div>
+  <button class="btn filled hidden" id="installBtn" onclick="doInstall()">앱 설치</button>
+  <button class="iconbtn" style="color:var(--label2)" aria-label="안내 닫기" onclick="dismissInstall()">
+    <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="config.js"></script>
@@ -401,6 +422,7 @@ sb.auth.onAuthStateChange((_, session) => {   // 토큰 갱신 때마다 다시 
 
 // ---------- 화면·탭 ----------
 async function render() {
+  document.body.classList.toggle("authed", !!user);   // 설치 안내를 탭바 위로 올린다
   $("auth").classList.toggle("hidden", !!user);
   $("app").classList.toggle("hidden", !user);
   if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; closeMenu(); return; }
@@ -826,6 +848,38 @@ async function loadTelegram(manual) {
         : "열리는 대화방에서 <b>시작</b>을 누르고 이 화면으로 돌아오면 자동으로 확인해요."}</div>`;
   }
 }
+
+// ---------- 홈 화면에 추가 (PWA, 서비스 워커 없음) ----------
+// iOS Safari: 공유 → 홈 화면에 추가 안내. 안드로이드 Chrome: beforeinstallprompt로 "앱 설치" 버튼. 닫으면 localStorage에 기억.
+const INSTALL_KEY = "transfit-install-dismissed";
+const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } },
+                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const UA = navigator.userAgent;
+const isIOS = /iPhone|iPad|iPod/.test(UA) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);   // iPadOS는 Mac으로 보임
+const isIOSSafari = isIOS && /Safari\//.test(UA) && !/CriOS|FxiOS|EdgiOS|OPiOS|GSA\/|KAKAOTALK|NAVER|Instagram|FBAN|FBAV|Line\//i.test(UA);
+let installEvt = null;
+const SHARE = `<svg class="share" viewBox="0 0 24 24" aria-label="공유"><path d="M8.5 9.5H7a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1h-1.5"/><path d="M12 14V3M8.5 6.5 12 3l3.5 3.5"/></svg>`;
+function showInstall(kind) {
+  if (isStandalone() || store.get(INSTALL_KEY)) return;
+  $("installText").innerHTML = kind === "ios"
+    ? `<b>홈 화면에 추가</b>하면 앱처럼 열려요<br><span class="cap">아래 공유 버튼 ${SHARE} → 홈 화면에 추가</span>`
+    : `<b>TransFit 앱 설치</b><br><span class="cap">홈 화면에서 바로 열 수 있어요</span>`;
+  $("installBtn").classList.toggle("hidden", kind !== "android");
+  $("install").classList.remove("hidden"); document.body.classList.add("has-install");
+}
+function hideInstall() { $("install").classList.add("hidden"); document.body.classList.remove("has-install"); }
+function dismissInstall() { store.set(INSTALL_KEY, "1"); hideInstall(); }
+async function doInstall() {
+  if (!installEvt) return hideInstall();
+  installEvt.prompt();
+  const { outcome } = await installEvt.userChoice;
+  installEvt = null; hideInstall();
+  if (outcome === "dismissed") store.set(INSTALL_KEY, "1");
+}
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; showInstall("android"); });
+addEventListener("appinstalled", () => { installEvt = null; hideInstall(); toast("홈 화면에 설치했어요"); });
+if (isIOSSafari) showInstall("ios");
 
 renderDays(); showTab();
 </script>

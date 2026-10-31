@@ -19,6 +19,7 @@ supabase/functions/telegram/ Edge Function: 텔레그램 웹훅 (/start 연결 �
 watch.py, test_watch.py      GitHub Actions가 10분마다 실행. Supabase 읽기 → 출발 시각 역산 → 실시간 지하철·버스 → 텔레그램 → notifications 기록
 .github/workflows/watch.yml  스케줄 + 수동 실행(test=true면 즉시 발송)
 web/index.html, web/config.js  웹앱 한 장, iOS 스타일 하단 탭 4개 (홈: 경로 카드·기록 버튼 / 길찾기: 검색→저장·직접 입력 / 기록: 요약·제외 / 설정: 텔레그램·알림). 배포: https://transfit-web.vercel.app
+web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·180). 서비스 워커는 일부러 안 씀 (캐시 때문에 배포 반영이 꼬임)
 .env.local                   SUBWAY_KEY, BUS_KEY, BOT_TOKEN, CHAT_ID, SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY, KAKAO_REST_KEY
 ```
 

@@ -1,0 +1,16 @@
+{
+  "name": "TransFit",
+  "short_name": "TransFit",
+  "description": "내 실제 통학 기록으로 계산한 집 나설 시각을 알려주는 앱",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#f2f2f7",
+  "background_color": "#f2f2f7",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
