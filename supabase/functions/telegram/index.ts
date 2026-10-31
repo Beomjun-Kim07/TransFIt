@@ -15,17 +15,16 @@
 //
 // 환경변수: BOT_TOKEN, TELEGRAM_SECRET(웹훅 검증), SUPABASE_URL·SUPABASE_SERVICE_ROLE_KEY(자동 주입)
 
+import { liveMessage, finalMessage, estimateDuration, TRIP_FIELDS, LOOKBACK_DAYS, type Trip } from "../_shared/trip_message.ts";
+
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
+const SUBWAY_KEY = Deno.env.get("SUBWAY_KEY") ?? "";
+const BUS_KEY = Deno.env.get("BUS_KEY") ?? "";
 const SECRET = Deno.env.get("TELEGRAM_SECRET") ?? "";
 const SB_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const TG = `https://api.telegram.org/bot${BOT}`;
 
-const TRIP_FIELDS = ["platform_at", "boarded_at", "transfer_off_at", "transfer_on_at", "ended_at"] as const;
-const LABEL: Record<string, string> = {
-  platform_at: "승강장 도착", boarded_at: "열차 탑승", transfer_off_at: "환승 하차",
-  transfer_on_at: "환승 탑승", ended_at: "목적지 도착",
-};
 
 // ---------- Supabase (PostgREST, service_role) ----------
 async function db(method: string, path: string, body?: unknown) {
@@ -42,22 +41,16 @@ async function db(method: string, path: string, body?: unknown) {
 }
 
 // ---------- Telegram ----------
-async function tg(method: string, payload: Record<string, unknown>) {
+async function tg(method: string, payload: Record<string, unknown>): Promise<any> {
   const r = await fetch(`${TG}/${method}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
   });
-  if (!r.ok) console.error(`tg ${method} ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) { console.error(`tg ${method}: ${j.description ?? r.status}`); return null; }
+  return j.result;
 }
 const reply = (chat_id: number, text: string, extra: Record<string, unknown> = {}) =>
   tg("sendMessage", { chat_id, text, ...extra });
-
-// 다음 단계 버튼 (아직 안 누른 것만)
-function nextButtons(trip: Record<string, unknown>) {
-  const rows = TRIP_FIELDS.filter((f) => !trip[f]).map((f) => [
-    { text: LABEL[f], callback_data: `trip:${f}:${trip.id}` },
-  ]);
-  return rows.length ? { reply_markup: { inline_keyboard: rows } } : {};
-}
 
 // ---------- /next: 출발 시각 계산 (watch.py estimate_duration / plan 과 같은 규칙) ----------
 const MIN_SAMPLES = 5, LOOKBACK_DAYS = 60, LATER = "(기록 쌓이면 바뀜)";
@@ -148,41 +141,63 @@ async function onMessage(m: any): Promise<string | void> {
 }
 
 // ---------- 버튼: trip:<field>:<id> ----------
+// start → trips 행 만들고 이동 중 메시지(tick과 같은 포맷)를 보내 live_msg_id 저장.
+// 그 외 → 시각 기록 후 그 메시지를 즉시 고쳐 쓴다 (새 메시지 없음). 콜백 응답은 토스트.
+const SELECT = "*,routes(id,name,arrive_by,confidence,baseline_sec,fallback_min)";
 async function onCallback(q: any) {
   const chat_id: number = q.message?.chat?.id;
   const data: string = q.data ?? "";
   const [kind, field, idStr] = data.split(":");
   const id = Number(idStr);
-  const now = new Date().toISOString();
+  const now = new Date(), nowIso = now.toISOString();
+  const toast = (text: string, alert = false) => tg("answerCallbackQuery", { callback_query_id: q.id, text, show_alert: alert });
   try {
     if (kind !== "trip" || !id) throw new Error("알 수 없는 버튼");
-    const users = await db("GET", `users?telegram_chat_id=eq.${chat_id}&select=id`);
-    const user = users[0];
+    const [user] = await db("GET", `users?telegram_chat_id=eq.${chat_id}&select=id`);
     if (!user) throw new Error("연결된 계정이 없어요");
 
+    let trip: Trip;
     if (field === "start") {
-      const [trip] = await db("POST", "trips", {
-        user_id: user.id, route_id: id, started_at: now, source: "telegram",
-      });
-      await tg("answerCallbackQuery", { callback_query_id: q.id, text: "출발 기록했어요" });
-      await reply(chat_id, `🚶 출발 ${now.slice(11, 16)} UTC 기록. 역에서 아래 버튼을 눌러 주세요.`, nextButtons(trip));
-      return;
+      const [open] = await db("GET", `trips?user_id=eq.${user.id}&route_id=eq.${id}&ended_at=is.null&order=started_at.desc&limit=1&select=${SELECT}`);
+      if (open && now.getTime() - Date.parse(open.started_at) < 3 * 3600_000) { trip = open; await toast("이미 출발 기록이 있어요"); }
+      else {
+        [trip] = await db("POST", `trips?select=${SELECT}`, { user_id: user.id, route_id: id, started_at: nowIso, source: "telegram" });
+        await toast("출발 기록했어요");
+      }
+    } else {
+      if (!(TRIP_FIELDS as readonly string[]).includes(field)) throw new Error("알 수 없는 단계");
+      const [cur] = await db("GET", `trips?id=eq.${id}&user_id=eq.${user.id}&select=${SELECT}`);
+      if (!cur) throw new Error("기록을 찾지 못했어요");
+      if (cur[field]) { trip = cur; await toast("이미 기록된 단계예요"); }
+      else { [trip] = await db("PATCH", `trips?id=eq.${id}&select=${SELECT}`, { [field]: nowIso }); await toast(`${field === "ended_at" ? "도착" : "단계"} 기록했어요`); }
     }
-    if (!(TRIP_FIELDS as readonly string[]).includes(field)) throw new Error("알 수 없는 단계");
-    const [trip] = await db("PATCH", `trips?id=eq.${id}&user_id=eq.${user.id}`, { [field]: now });
-    if (!trip) throw new Error("기록을 찾지 못했어요");
-    await tg("answerCallbackQuery", { callback_query_id: q.id, text: `${LABEL[field]} 기록했어요` });
-    // 누른 버튼은 빼고 남은 단계 버튼으로 갱신
-    await tg("editMessageReplyMarkup", {
-      chat_id, message_id: q.message.message_id,
-      reply_markup: nextButtons(trip).reply_markup ?? { inline_keyboard: [] },
-    });
-    if (field === "ended_at") {
-      const sec = Math.round((Date.parse(now) - Date.parse(trip.started_at)) / 1000);
-      await reply(chat_id, `🏁 도착. 오늘 소요시간 ${Math.floor(sec / 60)}분 ${sec % 60}초 — 기록에 반영됐어요.`);
+
+    const segments = await db("GET", `segments?route_id=eq.${trip.route_id}&order=seq`);
+    let text: string, markup: unknown;
+    if (trip.ended_at) {
+      let expected = trip.expected_sec;
+      if (!expected) {
+        const sinceIso = new Date(now.getTime() - LOOKBACK_DAYS * 86400_000).toISOString();
+        const trips = await db("GET", `trips?route_id=eq.${trip.route_id}&id=neq.${trip.id}&started_at=gte.${encodeURIComponent(sinceIso)}&select=started_at,ended_at,excluded`);
+        expected = estimateDuration(trip.routes, segments, trips);
+      }
+      ({ text, markup } = finalMessage(trip, expected));
+    } else {
+      ({ text, markup } = await liveMessage(trip, segments, { SUBWAY_KEY, BUS_KEY, now }));
     }
+    // 메시지 하나를 고쳐 쓴다. 없으면(start) 보내고 저장. 도착이면 live_msg_id 비움(tick이 다시 안 건드리게)
+    let msgId = trip.live_msg_id;
+    if (msgId) {
+      const r = await tg("editMessageText", { chat_id, message_id: msgId, text, reply_markup: markup });
+      if (r === null) msgId = null;                                 // 지워진 메시지 등 → 새로 보냄
+    }
+    if (!msgId) {
+      const m = await tg("sendMessage", { chat_id, text, reply_markup: markup });
+      msgId = m?.message_id ?? null;
+    }
+    await db("PATCH", `trips?id=eq.${trip.id}`, { live_msg_id: trip.ended_at ? null : msgId });
   } catch (e) {
-    await tg("answerCallbackQuery", { callback_query_id: q.id, text: String(e?.message ?? e), show_alert: true });
+    await toast(String(e?.message ?? e), true);
   }
 }
 
