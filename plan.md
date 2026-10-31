@@ -128,12 +128,16 @@
   - [pre30] 현재 시각이 (출발 시각 − 30분) 이후이고 출발 시각 이전이면
   - [live] 현재 시각이 (출발 시각 − 10분) 이후이고 (출발 시각 + 10분) 이전이면, 실시간 도착 API를 불러 "지금 나가면 N분 뒤 열차" 보정
 - 같은 알림 반복 방지 기준: `notifications (route_id, date, kind)` 유니크. 같은 날 같은 종류는 한 번만
+  - 보내기 전에 행부터 넣는다: `POST notifications?on_conflict=route_id,date,kind`, `Prefer: resolution=ignore-duplicates,return=representation` (= `INSERT … ON CONFLICT DO NOTHING RETURNING`). 응답에 새 행이 있을 때만 발송, 빈 배열이면 다른 실행이 먼저 넣은 것이라 발송 안 함. 발송이 실패하면 그 행을 지워 다음 실행이 다시 시도
+  - 실험 (10/31): 23:04 pre가 **2통** 발송됨 → 원인은 insert 뒤 "`sent_at`이 120초 이내면 내가 넣은 행"이라고 본 판단. 2분 안에 두 번 실행되면 둘 다 자기 행으로 보고 발송했다 → `b808e65`에서 위 방식으로 교체 (120초 판단 삭제) → 동시 2회 실행에도 **1통** 확인 (23:13 live). 함께 Actions는 `concurrency: watch`로 실행이 겹치지 않게 했다 (`6c3e628`)
 - 메시지 문구: "[TransFit] 09:00 도착 목표 · 08:12 출발 권장 (평소 소요 48분, 90% 기준, 기록 12회)"
 - 채널: 텔레그램
 
 ## 수첩 (마지막 상태)
 - 저장 위치: Supabase `notifications` 테이블 (state.json 대신)
 - 적는 값: route_id, date, kind, sent_at
+- 쓰는 순서: 발송 **전에** 행을 넣고(유니크 충돌이면 아무것도 안 들어감), 넣는 데 성공한 실행만 보낸다. 보내기 실패 → 행 삭제. 그래서 수첩에 행이 있으면 "보냈거나 보내는 중", 없으면 "아직 안 보냄"이다
+- 왜 바꿨나: 10/31 23:04 pre 2통 (예전엔 넣은 뒤 `sent_at` 120초 이내면 내 행으로 판단 → 2분 안 두 번 실행 시 둘 다 발송). `b808e65`부터 삽입 응답(`return=representation`)으로 판단, 23:13 live 동시 2회 실행에 1통 확인
 
 ## 설정 화면 (배포 URL)
 - 배포 URL: **https://transfit-web.vercel.app** (Vercel, Root Directory `web`, main push마다 자동 재배포)

@@ -44,12 +44,13 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
 - 버스 구간 저장: `station_from` = 승차 arsId, `station_to` = 하차 arsIdTo (route 응답 `steps[].arsId`/`arsIdTo`), 정류장 이름은 `line` 괄호에 — 예: `11211` / `11234` / `1142 (노원역1번출구→노원구청)`. watch.py는 station_from의 5자리로 조회하고 `route_match`가 line에서 노선 번호만 본다. 승차 번호를 못 찾으면 station_from/to에 이름을 두고 watch.py가 이름으로 찾는다.
 - 카카오 길찾기 단위: `time`/`totalTime` 초, `distance` m.
 
-## 지금 상태 (2026-10-31 22:54)
+## 지금 상태 (2026-10-31 23:22)
 - 완료: 1 커밋·push, 2 plan.md 원본 해부(캡처·api.yaml·대응표), 3 도보·환승 역설계 실험, 4 테이블 v2, 5 watch.py 로컬·Actions 실행 성공, 6 Secrets, 7 웹앱 1차(로그인·가입 동작 확인)
   - A `e75da7f`: route 함수 버스 arsId/arsIdTo(getStationByPos), telegram 웹훅(/start 연결, 역사 안 버튼 → trips, secret 검증) — 둘 다 배포, setWebhook 등록
   - A `c74ce7a`: trip 함수(단축어·앱용 trips 기록 API, users.api_token, docs/shortcuts.md). A `cbdf55d`: places 함수(장소 자동완성), route 좌표 입력(fromX/fromY/toX/toY)
   - B `5341692`: 지하철 방향 자동 판정, 버스 실시간(traTime1/traTime2), 키 가리기, test_watch.py. B `393f723`: excluded 기록 계산 제외 (test 38개 통과). B `e31a46d`: pre 알림에 "출발했어요" 버튼(trip:start:<route_id>)
   - B `7ccf1ec`: report.py 알림 수첩 + 매일 23:50 KST 커밋 잡, 알림 문구 개편. B `dad25ff`: 환승 체인(앞 구간에서 고른 차의 대기 시간을 다음 승차 시각에 누적)
+  - B `b808e65`: 중복 발송 수정 — 10/31 23:04 pre 2통(원인: insert 뒤 `sent_at` 120초 이내면 내 행으로 본 판단, 2분 안 두 번 실행 시 둘 다 발송) → notifications insert `resolution=ignore-duplicates,return=representation` 응답이 비면 발송 안 함, 발송 실패 시 행 삭제 → 동시 2회 실행에도 1통 확인(23:13 live). B `6c3e628`: cron 3-59/10, concurrency group watch
   - `f572e39`: schema.sql에 trips.excluded (DB엔 이미 적용)
   - C `3f28bd8`: 웹앱 모바일 정리, 텔레그램 연결 새로고침, 단계별 기록 흐름. C `c472c5d`: 경로/기록 탭, 기록 제외 토글, 버스 구간 arsId 저장
   - C `4720584`: 웹 전면 개편 — iOS 스타일 하단 탭 4개(홈·길찾기·기록·설정), 노선 공식 색 구간 막대, 다크 모드, 경로 삭제·lead_min/confidence 편집, 카카오 요금 객체 표시 버그 수정
