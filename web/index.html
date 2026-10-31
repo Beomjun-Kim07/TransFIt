@@ -514,11 +514,18 @@ const doneTodayOf = r => tripsOf(r).find(t => t.ended_at && sameDay(new Date(t.e
 function quantile(v, p) { v = [...v].sort((a,b)=>a-b); if (!v.length) return null; const pos=(v.length-1)*p, lo=Math.floor(pos), hi=Math.ceil(pos); return v[lo]+(v[hi]-v[lo])*(pos-lo); }
 function estimate(r) {   // [초, 근거]
   const durs = durationsOf(r), n = durs.length;
-  if (n >= MIN_SAMPLES) return [Math.round(quantile(durs, r.confidence / 100)), `기록 ${n}회 기준`];
+  if (n >= MIN_SAMPLES) return [Math.trunc(quantile(durs, r.confidence / 100)), `기록 ${n}회 기준`];   // watch.py int()처럼 버림
   const sum = segsOf(r).reduce((a, s) => a + (s.expected_sec || 0), 0);
   if (r.baseline_sec) return [r.baseline_sec, `지도 기준 · 기록 ${n}/${MIN_SAMPLES}회`];
   if (sum) return [sum, `구간 합 · 기록 ${n}/${MIN_SAMPLES}회`];
   return [r.fallback_min * 60, "기본값"];
+}
+// 출발 시각 = 도착 − 소요를 1분 단위로 올린 값. watch.py plan()과 같은 셈이라 웹 화면과 텔레그램 알림이 1분도 안 어긋난다
+function plan(r) {
+  const [dur, basis] = estimate(r), mins = Math.ceil(dur / 60);
+  const [h, m] = r.arrive_by.split(":").map(Number);
+  const arrive = new Date(); arrive.setHours(h, m, 0, 0);
+  return { arrive, depart: new Date(arrive - mins * 60e3), mins, basis };
 }
 
 // ---------- 홈 ----------
@@ -562,17 +569,15 @@ function progressHtml(r, t) {
   let head;
   if (!t.ended_at) head = `<b>이동 중</b> · ${hhmm(new Date(t.started_at))} 출발 · ${mins(t.started_at, new Date())}분째`;
   else {
-    const total = mins(t.started_at, t.ended_at), exp = t.expected_sec ? Math.round(t.expected_sec / 60) : null;
+    const total = mins(t.started_at, t.ended_at), exp = t.expected_sec ? Math.ceil(t.expected_sec / 60) : null;   // 카드의 "예상 N분"과 같은 올림
     const diff = exp == null ? "" : total === exp ? " · 예상과 같음" : total > exp ? ` · 예상보다 ${total - exp}분 더` : ` · 예상보다 ${exp - total}분 빨리`;
     head = `<b>오늘 ${total}분</b>${diff}${t.excluded ? " · 계산 제외" : ""}`;
   }
   return `<div class="prog"><div>${head}</div><div class="line">${done}</div></div>`;
 }
 function routeCard(r) {
-  const [dur, basis] = estimate(r), segs = segsOf(r), parts = segParts(segs);
-  const [h, m] = r.arrive_by.split(":").map(Number);
-  const arrive = new Date(); arrive.setHours(h, m, 0, 0);
-  const depart = new Date(arrive - dur * 1000), left = Math.round((depart - Date.now()) / 60000);
+  const { depart, mins: needMin, basis } = plan(r), segs = segsOf(r), parts = segParts(segs);
+  const left = Math.round((depart - Date.now()) / 60000);
   const open = openTripOf(r), done = !open && doneTodayOf(r);
   const when = open ? "이동 중" : done ? "" : !activeToday(r.active_days) ? "오늘은 쉬는 날"
     : left > 0 ? `${left >= 60 ? `${Math.floor(left / 60)}시간 ` : ""}${left % 60}분 남음` : left > -60 ? "출발 시각 지남" : "";
@@ -584,7 +589,7 @@ function routeCard(r) {
     <div class="rc-head"><h3>${esc(r.name)}</h3>
       <button class="iconbtn" aria-label="${esc(r.name)} 메뉴" onclick="openMenu(${r.id})"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.3"/><circle cx="7.9" cy="12" r=".8" fill="currentColor"/><circle cx="12" cy="12" r=".8" fill="currentColor"/><circle cx="16.1" cy="12" r=".8" fill="currentColor"/></svg></button></div>
     <div class="rc-time"><span class="lbl">출발</span><span class="big">${hhmm(depart)}</span>${when ? `<span class="pill${open || left > 0 && left <= 30 ? " now" : ""}">${when}</span>` : ""}</div>
-    <div class="sub">도착 목표 ${r.arrive_by.slice(0,5)} · 예상 ${Math.round(dur / 60)}분 · ${basis}</div>
+    <div class="sub">도착 목표 ${r.arrive_by.slice(0,5)} · 예상 ${needMin}분 · ${basis}</div>
     ${parts.length ? barHtml(parts) + legsHtml(parts) : `<div class="cap" style="margin-top:12px">구간이 없어요. 길찾기 › 직접 입력에서 추가해요.</div>`}
     ${progressHtml(r, open || done)}
     <button class="btn ${cls} cta" ${busyId !== null || done ? "disabled" : ""} onclick="cta(${r.id})">${label}</button>
