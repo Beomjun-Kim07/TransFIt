@@ -67,6 +67,7 @@ create table trips (
   source text default 'web',
   expected_sec int,
   walk_expected_sec int,
+  excluded boolean default false,   -- true면 소요시간 계산에서 제외 (이상치·잘못 누른 기록)
   created_at timestamptz default now()
 );
 
