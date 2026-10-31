@@ -417,7 +417,8 @@ def catch_item(label, catch, offset):
     return live_item("subway", label, [e - offset for e, _ in catch], any(is_rough(a) for _, a in catch))
 
 def subway_live(seg, offset, now, first):
-    """지하철 구간 하나 → 실시간 항목들. 지금 나가서 이 역에 닿는 시각(offset초 뒤) 이후 열차를 대기 시간으로."""
+    """지하철 구간 하나 → (실시간 항목들, 탈 열차의 대기 초 또는 None).
+    지금 나가서 이 역에 닿는 시각(offset초 뒤) 이후 열차를 대기 시간으로. 방향 미확정이면 탈 열차를 못 정해 None."""
     lid = line_id(seg.get("line"))
     a_name, arr = station_arrivals(seg.get("station_from"), lid)
     b_name, b_arr = station_arrivals(seg.get("station_to"), lid) if seg.get("station_to") else ("", [])
@@ -428,7 +429,7 @@ def subway_live(seg, offset, now, first):
     label = line_label(seg.get("line"), lid or (arr[0].get("subwayId") if arr else ""))
     note = lambda msg: [live_item("subway", label, note=msg)] if first else []   # 뒤 환승 구간은 못 잡으면 생략
     if not arr:
-        return note("열차 정보 없음")
+        return note("열차 정보 없음"), None
 
     if seg.get("updn"):
         # updnLine은 상행/하행/내선/외선 — 웹에서 '내선순환', '상행선'처럼 적어도 맞게
@@ -447,17 +448,17 @@ def subway_live(seg, offset, now, first):
             catch = [(e, a) for e, a in timed_trains(g, now) if e >= offset]
             if catch:
                 out.append(catch_item(f"{label} {way}", catch, offset))
-        return out or note("방향 미확정 · 잡을 수 있는 열차 없음")
+        return (out or note("방향 미확정 · 잡을 수 있는 열차 없음")), None
 
     timed = timed_trains(drop_short_turn(trains, b_ids), now)
     for e, a in timed:
         print(f"      {a.get('trainLineNm')} 열차 {a.get('btrainNo')} {e}초 ({a.get('arvlMsg2')})")
     if not timed:
-        return note("열차 정보 없음")
+        return note("열차 정보 없음"), None
     catch = [(e, a) for e, a in timed if e >= offset]
     if catch:
-        return [catch_item(label, catch, offset)]
-    return note("보이는 열차는 놓칠 듯 · 다음 열차 기준")
+        return [catch_item(label, catch, offset)], catch[0][0] - offset
+    return note("보이는 열차는 놓칠 듯 · 다음 열차 기준"), None
 
 # ---------- 실시간 버스 (서울 버스, 공공데이터포털) ----------
 def bus_get(op, **params):
@@ -545,7 +546,8 @@ def pick_bus_stop(entries, seg):
     return ([best[1]], "노선 정류장 순서") if best else (entries, "방향 판정 실패")
 
 def bus_live(seg, offset, now, first):
-    """버스 구간 하나 → 실시간 항목들. 지금 나가서 이 정류장에 닿는 시각(offset초 뒤) 이후 버스를 대기 시간으로."""
+    """버스 구간 하나 → (실시간 항목들, 탈 버스의 대기 초 또는 None).
+    지금 나가서 이 정류장에 닿는 시각(offset초 뒤) 이후 버스를 대기 시간으로. 후보가 여럿이면 가장 빨리 오는 버스."""
     entries = []
     for group in bus_stop_ids(seg):                # 이름 정확히 같은 정류장부터, 그 노선이 없으면 나머지 후보
         entries = [it for ars in group
@@ -554,7 +556,7 @@ def bus_live(seg, offset, now, first):
             break
     stop = seg.get("station_from") or "정류장"
     if not entries:
-        return [live_item("bus", bus_label(seg), note="버스 정보 없음")] if first else []
+        return ([live_item("bus", bus_label(seg), note="버스 정보 없음")] if first else []), None
     if seg.get("line"):
         picked, basis = pick_bus_stop(entries, seg)
     else:                                          # 노선을 모르면 그 정류장 버스 중 빨리 오는 3개
@@ -575,25 +577,55 @@ def bus_live(seg, offset, now, first):
             out.append(live_item("bus", label, note="보이는 버스는 놓칠 듯 · 다음 버스 기준"))
         elif first:
             out.append(live_item("bus", label, note=e.get("arrmsg1") or "도착 정보 없음"))   # '운행종료' 등
-    return out
+    waits = [it["waits"][0] for it in out if it["waits"]]
+    return out, (min(waits) if waits else None)
 
 # ---------- 실시간 묶음 ----------
+def place_of(seg):
+    """승차 지점 이름 (체인 로그용): 지하철 '노원역', 버스는 line 괄호의 승차 정류장 이름."""
+    if seg.get("kind") == "subway":
+        return f"{norm_station(seg.get('station_from'))}역"
+    m = BUS_LINE_RE.match(seg.get("line") or "")
+    return (m.group(2).split("→")[0] if m else stop_name(seg.get("station_from"))) or seg.get("station_from") or "정류장"
+
 def live_lines(segments, now):
-    """구간을 순서대로 따라가며, 지금 나가면 각 승차 지점에 닿는 시각 이후 열차·버스를 고른다 → 항목 목록(live_item).
-    첫 승차 구간은 항상 한 항목, 뒤 환승 구간은 잡을 수 있는 차가 보일 때만."""
-    out, offset, first = [], 0, True
-    for seg in segments:
-        kind = seg.get("kind")
-        if kind in ("subway", "bus") and (first or offset <= REALTIME_HORIZON):
-            if SUBWAY_KEY if kind == "subway" else BUS_KEY:
-                try:
-                    out += (subway_live if kind == "subway" else bus_live)(seg, offset, now, first)
-                except Exception as e:
-                    print(f"    {kind} 실시간 실패: {redact(e)}")
-                    if first:
-                        out.append(live_item(kind, seg_label(seg), note="실시간 조회 실패"))
-            first = False
-        offset += seg.get("expected_sec") or 0
+    """구간을 순서대로 따라가며 각 승차 지점에 닿는 시각(offset)을 체인으로 쌓고, 그 시각 이후 첫 열차·버스를 고른다.
+    도보·환승·승차는 예상 시간, 차 대기는 앞 구간에서 고른 차의 실제 대기(traTime·barvlDt):
+      정류장까지 도보 0분 + 버스 대기 7분 + 승차 8분 + 환승 도보 4분 = 노원역 20분 뒤 → 20분 뒤 이후 첫 열차.
+    첫 승차 구간은 항상 한 항목, 뒤 구간은 잡을 수 있는 차가 보일 때만. 앞 구간에서 탈 차를 못 정하면
+    (놓침·정보 없음·방향 미확정) 뒤 구간 도착 시각을 알 수 없어 거기서 멈춘다. → 항목 목록(live_item)."""
+    out, offset, first, chain = [], 0, True, []
+    mins = lambda sec: round(sec / 60)
+    for i, seg in enumerate(segments):
+        kind, sec = seg.get("kind"), seg.get("expected_sec") or 0
+        if kind not in ("subway", "bus"):
+            if not first:
+                chain.append(f"{'환승 도보' if kind == 'transfer' else '도보'} {mins(sec)}분")
+            offset += sec
+            continue
+        if first:
+            chain = [f"{'정류장' if kind == 'bus' else '역'}까지 도보 {mins(offset)}분"]
+        else:
+            print(f"    체인: {' + '.join(chain)} = {place_of(seg)} {mins(offset)}분 뒤")
+            if offset > REALTIME_HORIZON:
+                print(f"    → 실시간 범위({REALTIME_HORIZON // 60}분) 밖이라 여기서 멈춤")
+                break
+        items, wait = [], None
+        if SUBWAY_KEY if kind == "subway" else BUS_KEY:
+            try:
+                items, wait = (subway_live if kind == "subway" else bus_live)(seg, offset, now, first)
+            except Exception as e:
+                print(f"    {kind} 실시간 실패: {redact(e)}")
+                if first:
+                    items = [live_item(kind, seg_label(seg), note="실시간 조회 실패")]
+        out += items
+        if wait is None:
+            if any(s.get("kind") in ("subway", "bus") for s in segments[i + 1:]):
+                print("    → 탈 차를 못 정해 다음 승차 지점 도착 시각을 알 수 없음 — 여기서 멈춤")
+            break
+        chain += [f"{'버스' if kind == 'bus' else '열차'} 대기 {mins(wait)}분", f"승차 {mins(sec)}분"]
+        offset += wait + sec
+        first = False
     return out
 
 # ---------- 메인 ----------

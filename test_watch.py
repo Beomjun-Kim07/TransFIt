@@ -149,6 +149,38 @@ finally:
 ok(w.live_text(items) == "🚇 지금 출발하면: 4호선 1분·7분 뒤 도착", f"놓칠 열차·회차·반대 방향 빼고 2대 ({w.live_text(items)})")
 ok(w.live_text(late) == "🚇 지금 출발하면: 4호선 보이는 열차는 놓칠 듯 · 다음 열차 기준", "보이는 열차를 다 놓칠 때")
 
+print("== 환승 체인: 앞 구간 대기 시간을 다음 승차 시각에 누적 (가짜 버스·지하철)")
+# 경로 5 모양: 버스 1132(대기 428초=7분, 승차 509초) → 환승 도보 262초 → 노원역 = 428+509+262 = 1199초(20분) 뒤
+# 대기를 안 더하면 771초(13분) 뒤로 보고 780초(13분) 열차를 고르게 된다 — 그 열차는 실제로 못 탄다.
+bus_now = {"rtNm": "1132", "stNm": "중계주공10단지.중계건영3차아파트", "arsId": "11354", "adirection": "노원역",
+           "traTime1": "428", "arrmsg1": "7분후[6번째 전]", "traTime2": "900", "arrmsg2": "15분후[12번째 전]"}
+fake_bus = {"11354": [bus_now]}
+fake = {"노원": [tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, bar="780", no="13분"),
+                 tr("1004", "하행", "사당행 - 창동방면", 1004000411, 1004000412, 1004000433, bar="1000", no="회차"),
+                 tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, bar="1230", no="20분"),
+                 tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, bar="1500", no="25분")],
+        "선바위": [tr("1004", "하행", "오이도행 - 경마공원방면", 1004000435, 1004000436, 1004000456)]}
+route5 = [{"kind": "bus", "station_from": "11354", "station_to": "11213", "line": "1132 (중계주공10단지.중계건영3차아파트→와우패션클럽)", "expected_sec": 509},
+          {"kind": "transfer", "station_from": "와우패션클럽", "station_to": "노원", "expected_sec": 262},
+          {"kind": "subway", "station_from": "노원", "station_to": "선바위", "line": "4호선", "expected_sec": 3240}]
+real = (w.fetch_arrivals, w.bus_get, w.SUBWAY_KEY, w.BUS_KEY)
+w.fetch_arrivals = lambda st: fake.get(st, [])
+w.bus_get = lambda op, **p: fake_bus.get(p.get("arsId"), []) if op == "stationinfo/getStationByUid" else []
+w.SUBWAY_KEY, w.BUS_KEY = (w.SUBWAY_KEY or "x"), (w.BUS_KEY or "x")
+try:
+    chain_items = w.live_lines(route5, now)
+    fake_bus["11354"] = [dict(bus_now, traTime1="0", arrmsg1="운행종료", traTime2="0", arrmsg2="운행종료")]
+    stop_items = w.live_lines(route5, now)
+finally:
+    w.fetch_arrivals, w.bus_get, w.SUBWAY_KEY, w.BUS_KEY = real
+print("     >>", w.live_text(chain_items))
+sub = [it for it in chain_items if it["kind"] == "subway"]
+ok(chain_items[0]["waits"] == [428, 900], "첫 구간 버스: 대기 7분·15분")
+ok(len(sub) == 1 and sub[0]["waits"] == [1230 - 1199, 1500 - 1199],
+   "노원역 = 0 + 7 + 8 + 4 = 20분 뒤 → 13분 열차는 못 타고 20분 열차부터 (대기 31초·5분)")
+ok(w.live_text(chain_items) == "🚌 지금 출발하면: 1132번 7분·15분 뒤 도착 / 4호선 1분 미만·5분 뒤", "live 문구")
+ok(w.live_text(stop_items) == "🚌 지금 출발하면: 1132번 운행종료", "첫 버스를 못 정하면 뒤 구간은 도착 시각을 몰라 생략")
+
 print("== 버스 도착 파싱")
 ok(w.bus_eta({"arrmsg1": "10분후[5번째 전]", "traTime1": "592"}, 1, now) == 592, "traTime1 초 (getStationByUid)")
 ok(w.bus_eta({"arrmsg2": "곧 도착", "traTime2": "110"}, 2, now) == 110, "traTime2 / 곧 도착도 traTime 우선")
