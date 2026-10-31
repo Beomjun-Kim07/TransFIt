@@ -72,8 +72,12 @@ create table trips (
   expected_sec int,
   walk_expected_sec int,
   excluded boolean default false,   -- true면 소요시간 계산에서 제외 (이상치·잘못 누른 기록)
+  live_msg_id bigint,               -- 이동 중 안내 텔레그램 message_id (Edge Function tick이 고쳐 씀, 도착 후 null)
   created_at timestamptz default now()
 );
+
+-- 기존 DB에 live_msg_id 추가할 때 (한 번만):
+-- alter table trips add column if not exists live_msg_id bigint;
 
 -- 수첩: 오늘 무슨 알림을 보냈나 (같은 날 같은 종류는 한 번만)
 create table notifications (
