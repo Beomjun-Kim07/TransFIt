@@ -13,10 +13,11 @@ THE해커톤 CAMPUS 5조 (김범준·조연준)
 4. GitHub Actions가 10분마다 출발 시각을 계산해 출발 30분 전, 그리고 출발 직전(실시간 열차·버스 도착 반영)에 텔레그램으로 알립니다.
 
 ## 구성
-- `web/` — 웹앱 한 장 (Vercel, main push마다 자동 배포)
-- `supabase/` — 테이블 `schema.sql`, Edge Function `route`(길찾기 대리 호출), `telegram`(봇 웹훅)
-- `watch.py` — 출발 시각 계산·실시간 보정·텔레그램 알림 (`.github/workflows/watch.yml`)
-- `plan.md` — 원본 해부, 역설계 실험, 설계
+- `web/` — 웹앱 한 장, 홈 화면에 추가하는 PWA (Vercel, main push마다 자동 배포)
+- `android/` — 안드로이드 앱 (Kotlin·Jetpack Compose, 조연준). 집·역·목적지 지오펜스로 출발·도착을 자동 기록하고, 분위수·정체 감지로 출발 시각을 역산, 카카오 길찾기·실시간 지하철 연동. 빌드 방법은 `android/README.md`
+- `supabase/` — 테이블 `schema.sql`, Edge Function `route`(길찾기 대리 호출), `places`(장소 자동완성), `telegram`(봇 웹훅), `trip`(단축어·앱 기록 API)
+- `watch.py` — 출발 시각 계산·실시간 보정·텔레그램 알림 (`.github/workflows/watch.yml`), `report.py` — 매일 알림 수첩 (`docs/notebook.md`)
+- `plan.md` — 원본 해부, 역설계 실험, 설계 · `docs/shortcuts.md` — 아이폰 단축어로 기록하기
 
 비밀 키와 토큰은 저장소에 없습니다 (`.env.local`, GitHub Secrets, Supabase Secrets에만 보관). `web/config.js`에는 브라우저용 공개 키만 있고 접근은 RLS가 막습니다. 네트워크 캡처(HAR) 원본은 올리지 않았습니다.
 

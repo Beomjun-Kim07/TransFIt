@@ -16,7 +16,12 @@ docs/navermap_screenshot/    네이버 지도 앱 캡처 26장
 supabase/schema.sql          테이블 v2 (users/routes/segments/trips/notifications, RLS, 가입 트리거, trips.excluded)
 supabase/functions/route/    Edge Function: 카카오 길찾기 대리 호출 + 버스 arsId(getStationByPos). 배포됨
 supabase/functions/telegram/ Edge Function: 텔레그램 웹훅 (/start 연결 코드, trip:<단계>:<id> 버튼 → trips). 배포·setWebhook 완료
+supabase/functions/places/   Edge Function: 장소 자동완성 GET ?q= → [{name,address,x,y,category}] (헤더 없이 fetch)
+supabase/functions/trip/     Edge Function: 단축어·앱용 trips 기록 API (users.api_token, docs/shortcuts.md)
 watch.py, test_watch.py      GitHub Actions가 10분마다 실행. Supabase 읽기 → 출발 시각 역산 → 실시간 지하철·버스 → 텔레그램 → notifications 기록
+report.py                    매일 23:50 KST 알림 수첩 (docs/notebook.md 커밋, .github/workflows/report.yml)
+android/                     조연준 Kotlin·Compose 앱: 지오펜스 자동 기록(집·승차 역·목적지), 분위수·정체 감지·걷기 개인화, 카카오 길찾기·실시간 지하철.
+                             지금은 폰 안에서만 동작(Supabase trips 연동 미구현). 키는 루트 .env.local의 KAKAO_REST_KEY·SUBWAY_KEY를 빌드 때 읽음
 .github/workflows/watch.yml  스케줄 + 수동 실행(test=true면 즉시 발송)
 web/index.html, web/config.js  웹앱 한 장, iOS 스타일 하단 탭 4개 (홈: 경로 카드·기록 버튼 / 길찾기: 검색→저장·직접 입력 / 기록: 요약·제외 / 설정: 텔레그램·알림). 배포: https://transfit-web.vercel.app
 web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·180). 서비스 워커는 일부러 안 씀 (캐시 때문에 배포 반영이 꼬임)
@@ -39,12 +44,17 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
 - 버스 구간 저장: `station_from` = 승차 arsId, `station_to` = 하차 arsIdTo (route 응답 `steps[].arsId`/`arsIdTo`), 정류장 이름은 `line` 괄호에 — 예: `11211` / `11234` / `1142 (노원역1번출구→노원구청)`. watch.py는 station_from의 5자리로 조회하고 `route_match`가 line에서 노선 번호만 본다. 승차 번호를 못 찾으면 station_from/to에 이름을 두고 watch.py가 이름으로 찾는다.
 - 카카오 길찾기 단위: `time`/`totalTime` 초, `distance` m.
 
-## 지금 상태 (2026-10-31 20:40)
+## 지금 상태 (2026-10-31 21:30)
 - 완료: 1 커밋·push, 2 plan.md 원본 해부(캡처·api.yaml·대응표), 3 도보·환승 역설계 실험, 4 테이블 v2, 5 watch.py 로컬·Actions 실행 성공, 6 Secrets, 7 웹앱 1차(로그인·가입 동작 확인)
   - A `e75da7f`: route 함수 버스 arsId/arsIdTo(getStationByPos), telegram 웹훅(/start 연결, 역사 안 버튼 → trips, secret 검증) — 둘 다 배포, setWebhook 등록
+  - A `c74ce7a`: trip 함수(단축어·앱용 trips 기록 API, users.api_token, docs/shortcuts.md). A `cbdf55d`: places 함수(장소 자동완성), route 좌표 입력(fromX/fromY/toX/toY)
   - B `5341692`: 지하철 방향 자동 판정, 버스 실시간(traTime1/traTime2), 키 가리기, test_watch.py. B `393f723`: excluded 기록 계산 제외 (test 38개 통과). B `e31a46d`: pre 알림에 "출발했어요" 버튼(trip:start:<route_id>)
+  - B `7ccf1ec`: report.py 알림 수첩 + 매일 23:50 KST 커밋 잡, 알림 문구 개편
   - `f572e39`: schema.sql에 trips.excluded (DB엔 이미 적용)
-  - C `3f28bd8`: 웹앱 모바일 정리, 텔레그램 연결 새로고침, 단계별 기록 흐름. C `c472c5d`: 경로/기록 탭, 기록 제외 토글, 버스 구간 arsId 저장. C(이번): 웹 전면 개편 — iOS 스타일 하단 탭 4개(홈·길찾기·기록·설정), 노선 공식 색 구간 막대, 다크 모드, 경로 삭제·lead_min/confidence 편집, 카카오 요금 객체 표시 버그 수정
+  - C `3f28bd8`: 웹앱 모바일 정리, 텔레그램 연결 새로고침, 단계별 기록 흐름. C `c472c5d`: 경로/기록 탭, 기록 제외 토글, 버스 구간 arsId 저장
+  - C `4720584`: 웹 전면 개편 — iOS 스타일 하단 탭 4개(홈·길찾기·기록·설정), 노선 공식 색 구간 막대, 다크 모드, 경로 삭제·lead_min/confidence 편집, 카카오 요금 객체 표시 버그 수정
+  - C `5018b64`: PWA(manifest·T 아이콘·홈 화면 추가 안내, 서비스 워커 없음). C `4188cc9`: 길찾기 장소 자동완성(places, 현재 위치·최근 3개, 좌표로 route) + 결과 필터 칩·정렬
+  - 조연준 `b32df54`: 안드로이드 앱 `android/` — **`feat/android-app` 브랜치에만 있음, main 병합 전** (21:27 확인)
   - **웹앱 배포: https://transfit-web.vercel.app** (Vercel GitHub 연동, Root Directory `web`, main push마다 자동 재배포. 배포본 = 저장소 `web/index.html` 확인)
   - README: 소개·배포 URL·데이터 출처. 저장소에 비밀 키·HAR 없음 확인 (공개 키 `web/config.js`, 채팅 ID만 있음)
   - 버스 정류소정보조회 승인 확인 (실제 호출 정상)
@@ -61,7 +71,7 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
 8. 시간 남으면: 구글 로그인, iOS 단축어/안드로이드 앱(조연준)에서 trips 자동 기록, Capacitor로 앱 포장.
 
 ## 조연준 (팀원) 참고
-Kotlin 안드로이드 앱 `~/departure`(조연준 맥에만 있음, 미push)에 지오펜스 자동 기록·분위수·정체 감지·카카오 길찾기 연동이 이미 있다. push되면 그 앱이 Supabase `trips`에 같은 형식으로 쓰도록 연결한다. REA로 네이버 지도를 분석한 결과는 plan.md 대응표에 반영돼 있다.
+Kotlin 안드로이드 앱이 `android/`로 올라왔다(`feat/android-app` 브랜치 `b32df54`, 2026-10-31 21:09). 지오펜스 자동 기록·분위수·정체 감지·카카오 길찾기·실시간 지하철이 있다. 다음 단계는 그 앱이 Supabase `trips`에 같은 형식으로 쓰는 것 — `trip` 함수(api_token)를 쓰면 된다. `android/`는 조연준 영역이라 A·B·C 세션은 고치지 않는다. REA로 네이버 지도를 분석한 결과는 plan.md 대응표에 반영돼 있다.
 
 ## 병렬 작업 규칙 (Claude Code 3개 동시 실행)
 같은 폴더에서 세 세션이 돈다. **자기 영역 파일만** 고치고 커밋한다. 다른 영역 파일에 바꿀 게 있으면 고치지 말고 사용자에게 말한다.
