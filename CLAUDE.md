@@ -13,7 +13,7 @@ THE해커톤 CAMPUS 5조(김범준·조연준) 프로젝트. 네이버 지도 �
 plan.md                      설계·원본 해부·실험 결과 (매뉴얼 5.3 양식)
 docs/api.yaml                mitmproxy2swagger 산출물 (네이버 비공개 API 명세, 참고용)
 docs/navermap_screenshot/    네이버 지도 앱 캡처 26장
-supabase/schema.sql          테이블 v2 (users/routes/segments/trips/notifications, RLS, 가입 트리거). ※ trips.excluded는 DB에만 추가됨, 파일엔 아직 없음
+supabase/schema.sql          테이블 v2 (users/routes/segments/trips/notifications, RLS, 가입 트리거, trips.excluded)
 supabase/functions/route/    Edge Function: 카카오 길찾기 대리 호출 + 버스 arsId(getStationByPos). 배포됨
 supabase/functions/telegram/ Edge Function: 텔레그램 웹훅 (/start 연결 코드, trip:<단계>:<id> 버튼 → trips). 배포·setWebhook 완료
 watch.py, test_watch.py      GitHub Actions가 10분마다 실행. Supabase 읽기 → 출발 시각 역산 → 실시간 지하철·버스 → 텔레그램 → notifications 기록
@@ -41,7 +41,8 @@ web/index.html, web/config.js  웹앱 한 장 (로그인, 텔레그램 연결, �
 ## 지금 상태 (2026-10-31 19:45)
 - 완료: 1 커밋·push, 2 plan.md 원본 해부(캡처·api.yaml·대응표), 3 도보·환승 역설계 실험, 4 테이블 v2, 5 watch.py 로컬·Actions 실행 성공, 6 Secrets, 7 웹앱 1차(로그인·가입 동작 확인)
   - A `e75da7f`: route 함수 버스 arsId/arsIdTo(getStationByPos), telegram 웹훅(/start 연결, 역사 안 버튼 → trips, secret 검증) — 둘 다 배포, setWebhook 등록
-  - B `5341692`: 지하철 방향 자동 판정, 버스 실시간(traTime1/traTime2), 키 가리기, test_watch.py. B `393f723`: excluded 기록 계산 제외 (test 38개 통과)
+  - B `5341692`: 지하철 방향 자동 판정, 버스 실시간(traTime1/traTime2), 키 가리기, test_watch.py. B `393f723`: excluded 기록 계산 제외 (test 38개 통과). B `e31a46d`: pre 알림에 "출발했어요" 버튼(trip:start:<route_id>)
+  - `f572e39`: schema.sql에 trips.excluded (DB엔 이미 적용)
   - C `3f28bd8`: 웹앱 모바일 정리, 텔레그램 연결 새로고침, 단계별 기록 흐름. C(이번): 경로/기록 탭, 기록 제외 토글, 버스 구간 arsId 저장
   - 버스 정류소정보조회 승인 확인 (실제 호출 정상)
 - 진행 중: C — Vercel 배포(GitHub Import 대기), README
