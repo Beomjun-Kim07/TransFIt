@@ -24,7 +24,7 @@ web/index.html, web/config.js  웹앱 한 장 (로그인, 텔레그램 연결, �
 
 ## 외부 자원 (모두 발급 완료)
 - Supabase 프로젝트 `transfit` (`https://ezpvhadfzpznzwmhaktp.supabase.co`). 테이블 v2 적용됨. Email 로그인, Confirm email 꺼짐.
-- 텔레그램 봇 `@transfit_user_bot`. 범준 채팅 ID 5991126583.
+- 텔레그램 봇 `@transfit_user_bot`. 범준 채팅 ID (.env.local의 CHAT_ID).
 - 서울열린데이터광장 실시간 지하철 키, 공공데이터포털 버스 키(`getStationByUid`), 카카오 REST 키(카카오맵 사용 설정 필요).
 - GitHub Actions Secrets 등록됨: SUPABASE_URL, SUPABASE_SERVICE_KEY, BOT_TOKEN, SUBWAY_KEY, BUS_KEY. 수동 실행(test=true)으로 텔레그램 수신 확인함.
 - 이 맥엔 node가 없다. Supabase CLI는 Homebrew(`supabase` 2.122.0, 프로젝트 link 완료)라 `npx` 없이 `supabase …`로 실행. Vercel은 CLI 대신 GitHub 연동(Import)으로 배포.
