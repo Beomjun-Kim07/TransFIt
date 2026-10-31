@@ -36,7 +36,7 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
 - 이 맥엔 node가 없다. Supabase CLI는 Homebrew(`supabase` 2.122.0, 프로젝트 link 완료)라 `npx` 없이 `supabase …`로 실행. Vercel은 CLI 대신 GitHub 연동(Import)으로 배포.
 
 ## 핵심 로직 (watch.py / web 공통)
-- 소요시간: trips 기록 5회 이상이면 `confidence`% 분위수(선형보간), 아니면 `routes.baseline_sec` → segments 합 → `fallback_min`. 쓰는 기록 = 도착까지 찍힘 + `excluded`가 true 아님 + 3분~3시간 (웹 기록 탭 "제외" 토글이 `trips.excluded`를 바꾼다).
+- 소요시간: trips 기록 5회 이상이면 `confidence`% 분위수(선형보간), 아니면 `routes.baseline_sec` → segments 합 → `fallback_min`. `routes.baseline_src`: `'kakao'`(길찾기 저장 때 카카오 totalTime, 기본값) / `'manual'`(웹 구간 수정에서 구간 합으로 바꿈 → 근거 문구 "직접 수정한 예상 기준"). 쓰는 기록 = 도착까지 찍힘 + `excluded`가 true 아님 + 3분~3시간 (웹 기록 탭 "제외" 토글이 `trips.excluded`를 바꾼다).
 - 출발 시각 = arrive_by − 소요시간. `pre`(출발 lead_min 전)와 `live`(출발 ±10분, 실시간 열차 보정) 두 번 알림. 같은 날 같은 종류는 `notifications` 유니크로 한 번만.
 - 도보 구간 초기값 = 거리 ÷ 3.7 km/h (실험으로 확인한 네이버 상수). 기록이 쌓이면 개인값으로 교체.
 - 실시간 지하철: `realtimeStationArrival`, 필드 `barvlDt`(초), `btrainNo`, `updnLine`, `subwayId`(4호선=1004). updn이 비면 watch.py가 방면(다음 역)·종착역·역 ID 순서로 방향을 고른다.
@@ -44,7 +44,7 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
 - 버스 구간 저장: `station_from` = 승차 arsId, `station_to` = 하차 arsIdTo (route 응답 `steps[].arsId`/`arsIdTo`), 정류장 이름은 `line` 괄호에 — 예: `11211` / `11234` / `1142 (노원역1번출구→노원구청)`. watch.py는 station_from의 5자리로 조회하고 `route_match`가 line에서 노선 번호만 본다. 승차 번호를 못 찾으면 station_from/to에 이름을 두고 watch.py가 이름으로 찾는다.
 - 카카오 길찾기 단위: `time`/`totalTime` 초, `distance` m.
 
-## 지금 상태 (2026-10-31 23:48)
+## 지금 상태 (2026-10-31 23:52)
 - 완료: 1 커밋·push, 2 plan.md 원본 해부(캡처·api.yaml·대응표), 3 도보·환승 역설계 실험, 4 테이블 v2, 5 watch.py 로컬·Actions 실행 성공, 6 Secrets, 7 웹앱 1차(로그인·가입 동작 확인)
   - A `e75da7f`: route 함수 버스 arsId/arsIdTo(getStationByPos), telegram 웹훅(/start 연결, 역사 안 버튼 → trips, secret 검증) — 둘 다 배포, setWebhook 등록
   - A `c74ce7a`: trip 함수(단축어·앱용 trips 기록 API, users.api_token, docs/shortcuts.md). A `cbdf55d`: places 함수(장소 자동완성), route 좌표 입력(fromX/fromY/toX/toY)
@@ -56,6 +56,7 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
   - C `4720584`: 웹 전면 개편 — iOS 스타일 하단 탭 4개(홈·길찾기·기록·설정), 노선 공식 색 구간 막대, 다크 모드, 경로 삭제·lead_min/confidence 편집, 카카오 요금 객체 표시 버그 수정
   - C `5018b64`: PWA(manifest·T 아이콘·홈 화면 추가 안내, 서비스 워커 없음). C `4188cc9`: 길찾기 장소 자동완성(places, 현재 위치·최근 3개, 좌표로 route) + 결과 필터 칩·정렬
   - C `174efc7`: 설정 탭 자동화 토큰 복사·재발급, route_id. C `189eee0`: 웹 출발 시각도 소요 1분 올림(watch.py plan과 일치). C `b57cc88`: 기록 탭 2단 화면(경로 리스트 → 상세·점 그래프, pushState 뒤로가기). C `8259401`: 길찾기 직접 입력 제거, 홈 ··· → 구간 수정
+  - C `b591aca`: 설정 자동화 토큰을 맨 아래 "고급 · 자동 기록" 접힘으로. C: 구간 수정 저장 때 구간 합이 baseline_sec와 1분 이상 다르면 출발 기준 갱신 확인 → `baseline_sec`=구간 합, `baseline_src`='manual'. **대기: routes.baseline_src 컬럼 SQL(사용자), watch.py·telegram /next 근거 문구(B·A), schema.sql 반영**
   - 조연준 `b32df54`: 안드로이드 앱 `android/` — main 병합 `80671eb`
   - **웹앱 배포: https://transfit-web.vercel.app** (Vercel GitHub 연동, Root Directory `web`, main push마다 자동 재배포. 배포본 = 저장소 `web/index.html` 확인)
   - README: 소개·배포 URL·데이터 출처. 저장소에 비밀 키·HAR 없음 확인 (공개 키 `web/config.js`, 채팅 ID만 있음)

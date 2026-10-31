@@ -577,11 +577,13 @@ const durationsOf = r => tripsOf(r).filter(usable).map(tripSec);
 const openTripOf = r => tripsOf(r).find(t => !t.ended_at && Date.now() - new Date(t.started_at) < OPEN_MS) || null;
 const doneTodayOf = r => tripsOf(r).find(t => t.ended_at && sameDay(new Date(t.ended_at), new Date())) || null;
 function quantile(v, p) { v = [...v].sort((a,b)=>a-b); if (!v.length) return null; const pos=(v.length-1)*p, lo=Math.floor(pos), hi=Math.ceil(pos); return v[lo]+(v[hi]-v[lo])*(pos-lo); }
+// routes.baseline_src: 'kakao' = 길찾기 저장 때 카카오 totalTime, 'manual' = 구간 수정에서 구간 합으로 바꿈
+const baseLabel = r => r?.baseline_src === "manual" ? "직접 수정한 예상" : "카카오 예상";
 function estimate(r) {   // [초, 근거]
   const durs = durationsOf(r), n = durs.length;
   if (n >= MIN_SAMPLES) return [Math.trunc(quantile(durs, r.confidence / 100)), `기록 ${n}회 기준`];   // watch.py int()처럼 버림
   const sum = segsOf(r).reduce((a, s) => a + (s.expected_sec || 0), 0);
-  if (r.baseline_sec) return [r.baseline_sec, `지도 기준 · 기록 ${n}/${MIN_SAMPLES}회`];
+  if (r.baseline_sec) return [r.baseline_sec, `${r.baseline_src === "manual" ? "직접 수정한 예상 기준" : "지도 기준"} · 기록 ${n}/${MIN_SAMPLES}회`];
   if (sum) return [sum, `구간 합 · 기록 ${n}/${MIN_SAMPLES}회`];
   return [r.fallback_min * 60, "기본값"];
 }
@@ -1084,8 +1086,17 @@ async function segSave() {
   const bad = ed.rows.findIndex(d => d.kind === "bus" && [d.fromNo, d.toNo].some(v => String(v).trim() && !isArs(String(v).trim())));
   if (bad >= 0) return alert(`구간 ${bad + 1}: 정류장 번호는 5자리 숫자예요 (예: 11211). 모르면 비워 두세요.`);
   if (!ed.dirty) return segCancel();
-  ed.saving = true; $("segSaveBtn").disabled = true; $("segSaveBtn").textContent = "저장 중…";
   const rows = ed.rows.map((d, i) => ({ id: d.id, row: segRow(d, i) }));
+  // 구간 합이 출발 기준(baseline_sec)과 1분 이상 다르면 기준도 바꿀지 묻는다. 예 → baseline_sec = 구간 합, baseline_src = 'manual'
+  const sum = rows.reduce((a, x) => a + (x.row.expected_sec || 0), 0);
+  let newBase = null;
+  if (r.baseline_sec && sum && Math.abs(sum - r.baseline_sec) >= 60) {
+    const n = durationsOf(r).length;
+    if (confirm(`출발 시각을 구간 합 ${Math.ceil(sum / 60)}분 기준으로 바꿀까요? (지금: ${baseLabel(r)} ${Math.ceil(r.baseline_sec / 60)}분)` +
+      (n >= MIN_SAMPLES ? `\n\n지금은 내 기록 ${n}회로 계산하고 있어서, 이 값은 쓸 수 있는 기록이 ${MIN_SAMPLES}회보다 적을 때 쓰여요.` : "") +
+      "\n\n취소를 누르면 구간만 저장해요.")) newBase = sum;
+  }
+  ed.saving = true; $("segSaveBtn").disabled = true; $("segSaveBtn").textContent = "저장 중…";
   const keep = new Set(rows.filter(x => x.id).map(x => x.id)), gone = ed.origIds.filter(id => !keep.has(id));
   const errs = [];
   const note = ({ error }) => { if (error) errs.push(error.message); };
@@ -1093,12 +1104,17 @@ async function segSave() {
   (await Promise.all(rows.filter(x => x.id).map(x => sb.from("segments").update(x.row).eq("id", x.id)))).forEach(note);
   const fresh = rows.filter(x => !x.id).map(x => ({ route_id: r.id, ...x.row }));
   if (fresh.length) note(await sb.from("segments").insert(fresh));
+  if (newBase != null) {
+    let res = await sb.from("routes").update({ baseline_sec: newBase, baseline_src: "manual" }).eq("id", r.id);
+    if (res.error && /baseline_src/.test(res.error.message)) res = await sb.from("routes").update({ baseline_sec: newBase }).eq("id", r.id);   // 컬럼 추가 SQL 실행 전
+    note(res);
+  }
   ed.saving = false; $("segSaveBtn").disabled = false; $("segSaveBtn").textContent = "저장";
   ed.closing = true; ed.dirty = false;   // 실패해도 닫고 DB에서 다시 읽는다 (초안을 다시 저장하면 새 구간이 두 번 들어갈 수 있어서)
   if (history.state?.seg) history.back(); else hideSegEdit();
   await loadAll();
   if (errs.length) alert("일부를 저장하지 못했어요: " + errs[0] + "\n··· › 구간 수정을 다시 열어 확인해 주세요.");
-  else toast("구간을 저장했어요");
+  else toast(newBase != null ? `구간을 저장하고 출발 기준을 ${Math.ceil(newBase / 60)}분으로 바꿨어요` : "구간을 저장했어요");
 }
 
 // ---------- 기록 ----------
@@ -1139,11 +1155,11 @@ function renderRecDetail() {
   $("rdStats").innerHTML = `<div><span>평균</span><b>${m(s.avg)}</b><i>분</i></div>
     <div><span>${conf}% 값</span><b>${m(s.q)}</b><i>분</i></div>
     <div><span>횟수</span><b>${s.n}</b><i>회</i></div>`;
-  const base = v === "all" ? (routes.length === 1 ? routes[0].baseline_sec : null) : routeById(v)?.baseline_sec;
+  const br = v === "all" ? (routes.length === 1 ? routes[0] : null) : routeById(v), base = br?.baseline_sec;
   const w = Math.max(240, ($("rdChart").clientWidth || 343));
   $("rdChart").innerHTML = chartSvg(list, base, w);
   $("rdLegend").innerHTML = $("rdChart").querySelector("svg")
-    ? `<span><i></i>계산에 쓴 기록</span><span><i class="off"></i>제외</span>${base ? `<span><i class="base"></i>카카오 예상 ${Math.round(base / 60)}분</span>` : ""}` : "";
+    ? `<span><i></i>계산에 쓴 기록</span><span><i class="off"></i>제외</span>${base ? `<span><i class="base"></i>${baseLabel(br)} ${Math.round(base / 60)}분</span>` : ""}` : "";
   $("rdNote").textContent = REC_NOTE;
   let html = "", day = "";
   for (const t of list) {
@@ -1163,7 +1179,7 @@ function renderRecDetail() {
   }
   $("rdList").innerHTML = html ? html + "</div>" : `<div class="card empty" style="margin-top:16px"><b>아직 기록이 없어요</b><div class="sub">홈에서 <b style="display:inline;font-size:inherit">출발했어요</b>를 눌러 시작해요.</div></div>`;
 }
-// 점 그래프: 가로 = 날짜, 세로 = 소요 분. 제외 기록은 빈 점, 카카오 예상(baseline)은 점선 가로줄. 최근 60일·3분~3시간만
+// 점 그래프: 가로 = 날짜, 세로 = 소요 분. 제외 기록은 빈 점, 출발 기준(baseline: 카카오 예상 또는 직접 수정)은 점선 가로줄. 최근 60일·3분~3시간만
 function chartSvg(list, baseSec, W) {
   const pts = list.filter(t => t.ended_at && inRange(t) && Date.now() - new Date(t.started_at) <= LOOKBACK_MS)
     .map(t => ({ x: +new Date(t.started_at), y: tripSec(t) / 60, off: !!t.excluded }));
