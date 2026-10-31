@@ -16,7 +16,7 @@
 
 // 실시간 로직은 B의 supabase/functions/_shared/realtime.ts 를 쓴다. 그 파일이 올 때까지 같은 시그니처의 임시 파일.
 // TODO(B 완료 후): 아래 한 줄을 "../_shared/realtime.ts" 로 바꾸고 realtime_tmp.ts 삭제
-import { liveChain, isRide, itemTxt, segSummary, segLabel, type Seg, type LiveItem } from "./realtime_tmp.ts";
+import { liveChain, liveLineText, isRide, segLabel, lineLabel, busLabel, stopName, normStation, type Seg, type ChainItem } from "./realtime_tmp.ts";
 
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
 const SUBWAY_KEY = Deno.env.get("SUBWAY_KEY") ?? "";
@@ -117,14 +117,22 @@ function position(t: any, segments: Seg[], now: Date) {
 }
 
 // 실시간 조회 캐시: trip당 1분에 1회 이하 (단계가 바뀌면 다시 조회)
-const liveCache = new Map<number, { at: number; segIdx: number; items: LiveItem[]; waitSec: Record<number, number> }>();
+const liveCache = new Map<number, { at: number; segIdx: number; items: ChainItem[] }>();
 async function liveFrom(tripId: number, segments: Seg[], fromIndex: number, walkSec: number, now: Date) {
   const c = liveCache.get(tripId);
-  if (c && c.segIdx === fromIndex && now.getTime() - c.at < 55_000) return c;
-  const r = await liveChain(segments, fromIndex, walkSec, { SUBWAY_KEY, BUS_KEY, now });
-  const entry = { at: now.getTime(), segIdx: fromIndex, ...r };
-  liveCache.set(tripId, entry);
-  return entry;
+  if (c && c.segIdx === fromIndex && now.getTime() - c.at < 55_000) return c.items;
+  const items = await liveChain(segments, fromIndex, walkSec, { SUBWAY_KEY, BUS_KEY, now });
+  liveCache.set(tripId, { at: now.getTime(), segIdx: fromIndex, items });
+  return items;
+}
+// 구간 요약 (watch.py seg_summary): '4호선 노원→선바위', '9201번 선바위역2번출구(광역)→연세대'
+function segSummary(s: Seg): string | null {
+  if (s.kind === "subway") return [lineLabel(s.line), [normStation(s.station_from), normStation(s.station_to)].filter(Boolean).join("→")].filter(Boolean).join(" ");
+  if (s.kind === "bus") {
+    const m = /^\s*(.*?)\s*\((.*)\)\s*$/.exec(s.line ?? "");
+    return [busLabel(s), m ? m[2] : [stopName(s.station_from), stopName(s.station_to)].filter(Boolean).join("→")].filter(Boolean).join(" ");
+  }
+  return null;
 }
 
 function buttons(t: any, rides: number) {
@@ -138,9 +146,11 @@ async function buildLive(t: any, segments: Seg[], now: Date) {
   if (p.next >= 0) {
     const seg = segments[p.next];
     if (p.pre <= REALTIME_HORIZON) {
-      const { items, waitSec } = await liveFrom(t.id, segments, p.next, p.pre, now);
-      liveLine = items.length ? `${seg.kind === "bus" ? "🚌" : "🚇"} 다음: ${items.map((it, i) => itemTxt(it, i === 0)).join(" / ")}` : "";
-      // 남은 시간 = 승차 지점까지 + (실시간 대기 + 승차) … 뒤 구간도 체인에서 잡은 대기는 더한다
+      const items = await liveFrom(t.id, segments, p.next, p.pre, now);
+      liveLine = items.length ? `${seg.kind === "bus" ? "🚌" : "🚇"} 다음: ${items.map((it, i) => liveLineText(it, it.readyInSec, i === 0)).join(" / ")}` : "";
+      // 남은 시간 = 승차 지점까지 + Σ(구간 예상) + 체인이 잡은 차의 실제 대기(waits[0] - readyInSec)
+      const waitSec: Record<number, number> = {};
+      for (const it of items) if (it.waits.length) waitSec[it.index] = it.waits[0] - it.readyInSec;
       remaining = p.pre + segments.slice(p.next).reduce((a, s, k) => a + (s.expected_sec || 0) + (waitSec[p.next + k] ?? 0), 0);
       if (waitSec[p.next] === undefined) waitNote = " · 대기 미확인";
     } else {

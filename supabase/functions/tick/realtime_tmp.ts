@@ -1,14 +1,15 @@
 // 임시 파일 — B가 supabase/functions/_shared/realtime.ts 를 만들면 index.ts의 import를 그쪽으로 바꾸고 이 파일을 지운다.
 // watch.py live_lines 로직의 TS 포팅. 시그니처는 _shared/realtime.ts 와 같게 맞춘다:
-//   liveForSegment(seg, readyInSec, env) → { items, waitSec }   한 승차 구간. readyInSec = 그 승차 지점에 닿기까지 남은 초
-//   liveChain(segments, fromIndex, walkSec, env) → { items, waitSec: {segIndex: 대기 초} }
-//     fromIndex부터 구간을 따라가며 승차 지점 도착 시각을 체인으로 쌓는다 (watch.py live_lines). walkSec = 시작 offset
-//   env = { SUBWAY_KEY, BUS_KEY, now? }
+//   liveForSegment(seg, readyInSec, env) → Live | null      한 승차 구간. readyInSec = 그 승차 지점에 닿기까지 남은 초
+//   liveChain(segments, fromIndex, walkSec, env) → ChainItem[] fromIndex부터 체인(watch.py live_lines). walkSec = 시작 offset
+//   Live.waits 는 '지금'부터의 절대 초 (대기 = waits[0] - readyInSec). liveLineText / liveText 는 문구.
 
 export type Seg = Record<string, any>;
-export type LiveItem = { kind: string; label: string; waits: number[]; rough: boolean; note: string | null };
-export type RealtimeEnv = { SUBWAY_KEY?: string; BUS_KEY?: string; now?: Date };
-type Item = LiveItem;
+export type Env = { SUBWAY_KEY?: string; BUS_KEY?: string; now?: Date; log?: (msg: string) => void };
+export type Way = { line: string; waits: number[] };
+export type Live = { line: string; waits: number[]; note?: string; rough?: boolean; ways?: Way[] };
+export type ChainItem = Live & { index: number; kind: string; readyInSec: number; chain: string };
+type Item = { kind: string; label: string; waits: number[]; rough: boolean; note: string | null };   // 내부 (상대 초)
 
 const REALTIME_HORIZON = 30 * 60;   // 실시간 API가 보여 주는 대략의 범위(초)
 const SEC_PER_STATION = 120;
@@ -71,7 +72,7 @@ export function segSummary(s: Seg): string | null {
 }
 const item = (kind: string, label: string, waits: number[] = [], rough = false, note: string | null = null): Item =>
   ({ kind, label, waits, rough, note });
-export function itemTxt(it: Item, first: boolean) {
+function itemTxt(it: Item, first: boolean) {
   if (it.note) return `${it.label} ${it.note}`;
   return `${it.label} ${it.rough ? "약 " : ""}${it.waits.map(waitTxt).join("·")} 뒤${first ? " 도착" : ""}`;
 }
@@ -332,46 +333,66 @@ async function busLive(seg: Seg, offset: number, now: Date, first: boolean): Pro
 }
 
 
-// ---------- 공개 API ----------
+// ---------- 공개 API (B의 _shared/realtime.ts 와 같은 모양) ----------
 export const isRide = (s: Seg) => s.kind === "subway" || s.kind === "bus";
+const mins = (sec: number) => Math.round(sec / 60);
 
-export async function liveForSegment(seg: Seg, readyInSec: number, env: RealtimeEnv): Promise<{ items: LiveItem[]; waitSec: number | null }> {
+// 내부 항목(상대 초) → Live(절대 초). 방향 미확정처럼 항목이 여럿이면 ways
+function toLive(items: Item[], ready: number, fallbackLabel: string): Live {
+  if (!items.length) return { line: fallbackLabel, waits: [], note: "정보 없음" };
+  const abs = (it: Item) => it.waits.map((w) => w + ready);
+  const main = items.find((it) => it.waits.length) ?? items[0];
+  const live: Live = { line: main.label, waits: abs(main), rough: main.rough, ...(main.note ? { note: main.note } : {}) };
+  if (items.length > 1) live.ways = items.map((it) => ({ line: it.label, waits: abs(it) }));
+  return live;
+}
+
+export async function liveForSegment(seg: Seg, readyInSec: number, env: Env): Promise<Live | null> {
+  if (!isRide(seg)) return null;
   SUBWAY_KEY = env.SUBWAY_KEY ?? ""; BUS_KEY = env.BUS_KEY ?? "";
   const now = env.now ?? new Date();
-  const key = seg.kind === "subway" ? SUBWAY_KEY : BUS_KEY;
-  if (!key) return { items: [item(seg.kind, segLabel(seg), [], false, "실시간 키 없음")], waitSec: null };
+  if (!(seg.kind === "subway" ? SUBWAY_KEY : BUS_KEY)) return { line: segLabel(seg), waits: [], note: "실시간 키 없음" };
   try {
-    const [items, waitSec] = await (seg.kind === "subway" ? subwayLive : busLive)(seg, readyInSec, now, true);
-    return { items, waitSec };
+    const [items] = await (seg.kind === "subway" ? subwayLive : busLive)(seg, readyInSec, now, true);
+    return toLive(items, readyInSec, segLabel(seg));
   } catch (e) {
-    console.error(`${seg.kind} 실시간 실패`, String(e));
-    return { items: [item(seg.kind, segLabel(seg), [], false, "실시간 조회 실패")], waitSec: null };
+    (env.log ?? console.error)(`    ${seg.kind} 실시간 실패: ${String(e)}`);
+    return { line: segLabel(seg), waits: [], note: "실시간 조회 실패" };
   }
 }
 
-/** watch.py live_lines: fromIndex부터 구간을 따라가며 승차 지점 도착 시각(offset)을 체인으로 쌓고 그 시각 이후 첫 차를 고른다.
- *  첫 승차 구간은 항상 한 항목, 뒤 구간은 잡을 수 있는 차가 보일 때만. 탈 차를 못 정하면 거기서 멈춘다. */
-export async function liveChain(segments: Seg[], fromIndex: number, walkSec: number, env: RealtimeEnv): Promise<{ items: LiveItem[]; waitSec: Record<number, number> }> {
-  SUBWAY_KEY = env.SUBWAY_KEY ?? ""; BUS_KEY = env.BUS_KEY ?? "";
-  const now = env.now ?? new Date();
-  const items: LiveItem[] = [], waitSec: Record<number, number> = {};
-  let offset = walkSec, first = true;
-  for (let i = fromIndex; i < segments.length; i++) {
+/** watch.py live_lines: fromIndex부터 구간을 따라가며 승차 지점 도착 시각(offset)을 체인으로 쌓고 그 시각 이후 첫 차를 고른다. */
+export async function liveChain(segments: Seg[], fromIndex: number, walkSec: number, env: Env): Promise<ChainItem[]> {
+  env = { ...env, now: env.now ?? new Date() };
+  const out: ChainItem[] = [];
+  let offset = walkSec, first = true, chain: string[] = [];
+  for (let i = Math.max(0, fromIndex); i < segments.length; i++) {
     const seg = segments[i], sec = seg.expected_sec || 0;
-    if (!isRide(seg)) { offset += sec; continue; }
+    if (!isRide(seg)) { if (!first) chain.push(`${seg.kind === "transfer" ? "환승 도보" : "도보"} ${mins(sec)}분`); offset += sec; continue; }
+    if (first) chain = [`${seg.kind === "bus" ? "정류장" : "역"}까지 도보 ${mins(offset)}분`];
+    const chainTxt = `${chain.join(" + ")} = ${segLabel(seg)} ${mins(offset)}분 뒤`;
     if (!first && offset > REALTIME_HORIZON) break;
-    let got: LiveItem[] = [], wait: number | null = null;
-    const key = seg.kind === "subway" ? SUBWAY_KEY : BUS_KEY;
-    if (!key) { if (first) got = [item(seg.kind, segLabel(seg), [], false, "실시간 키 없음")]; }
-    else {
-      try { [got, wait] = await (seg.kind === "subway" ? subwayLive : busLive)(seg, offset, now, first); }
-      catch (e) { console.error(`${seg.kind} 실시간 실패`, String(e)); if (first) got = [item(seg.kind, segLabel(seg), [], false, "실시간 조회 실패")]; }
-    }
-    items.push(...got);
-    if (wait === null) break;
-    waitSec[i] = wait;
-    offset += wait + sec;
+    const live = (await liveForSegment(seg, offset, env))!;
+    const caught = live.waits.length > 0;
+    if (first || caught) out.push({ ...live, index: i, kind: seg.kind, readyInSec: offset, chain: chainTxt });
+    if (!caught) break;
+    chain.push(`${seg.kind === "bus" ? "버스" : "열차"} 대기 ${mins(live.waits[0] - offset)}분`, `승차 ${mins(sec)}분`);
+    offset = live.waits[0] + sec;
     first = false;
   }
-  return { items, waitSec };
+  return out;
+}
+
+export function liveLineText(live: Live, readyInSec: number, first = true): string {
+  const one = (line: string, waits: number[], i: number) =>
+    `${line} ${live.rough ? "약 " : ""}${waits.map((w) => waitTxt(w - readyInSec)).join("·")} 뒤${first && i === 0 ? " 도착" : ""}`;
+  const ways = (live.ways ?? []).filter((w) => w.waits.length);
+  if (ways.length) return ways.map((w, i) => one(w.line, w.waits, i)).join(" / ");
+  if (live.note) return `${live.line} ${live.note}`;
+  return one(live.line, live.waits, 0);
+}
+export function liveText(items: ChainItem[]): string {
+  if (!items.length) return "🚶 지금 출발하세요 (실시간 정보 없음)";
+  const icon = items[0].kind === "bus" ? "🚌" : "🚇";
+  return `${icon} 지금 출발하면: ${items.map((it, i) => liveLineText(it, it.readyInSec, i === 0)).join(" / ")}`;
 }
