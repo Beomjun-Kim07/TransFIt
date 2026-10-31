@@ -62,6 +62,21 @@
   .next { width:100%; min-height:60px; font-size:19px; margin-top:12px }
   .tools { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:8px }
   .tools button { font-size:14px; padding:6px 4px }
+  /* 탭 */
+  .tabs { display:grid; grid-template-columns:1fr 1fr; gap:4px; padding:4px; margin-bottom:12px; background:var(--inset); border:1px solid var(--line); border-radius:12px }
+  .tabs button { border:0; background:transparent; color:var(--muted); font-weight:600; min-height:40px }
+  .tabs button[aria-selected="true"] { background:var(--card); color:var(--fg); box-shadow:0 0 0 1px var(--line) }
+  /* 기록 탭 */
+  .dayhead { font-size:13px; color:var(--muted); font-weight:600; margin:14px 0 4px }
+  .dayhead:first-child { margin-top:4px }
+  .rec { border-top:1px solid var(--line); padding:10px 0 }
+  .rec-top { display:flex; gap:10px; align-items:flex-start }
+  .rec-main { flex:1; min-width:0; overflow-wrap:anywhere }
+  .rec.off .rec-main, .rec.off .rec-steps { opacity:.4 }
+  .rec-steps { display:flex; flex-wrap:wrap; gap:4px 10px; margin-top:4px; font-size:13px; color:var(--muted); font-variant-numeric:tabular-nums }
+  .toggle { flex:0 0 auto; min-height:36px; padding:4px 12px; font-size:14px; border-radius:999px }
+  .toggle[aria-checked="true"] { border-color:var(--danger); color:var(--danger); background:transparent }
+  .tag { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:6px; padding:0 6px; margin-left:4px; white-space:nowrap }
   footer { text-align:center; margin-top:24px }
   a { color:var(--accent) }
 </style>
@@ -91,6 +106,22 @@
       <button class="ghost small" onclick="signOut()">로그아웃</button>
     </div>
 
+    <nav class="tabs" role="tablist">
+      <button role="tab" id="tabRoutes" onclick="setTab('routes')">경로</button>
+      <button role="tab" id="tabRecords" onclick="setTab('records')">기록</button>
+    </nav>
+
+    <!-- 기록 탭 -->
+    <div id="paneRecords" class="hidden">
+      <div class="card">
+        <h2>내 기록</h2>
+        <div id="recSummary" class="muted"></div>
+        <div id="recList"><div class="muted">불러오는 중…</div></div>
+      </div>
+    </div>
+
+    <!-- 경로 탭 -->
+    <div id="paneRoutes">
     <div class="card" id="tgCard">
       <h2>텔레그램 알림</h2>
       <div id="tgBody" class="muted">불러오는 중…</div>
@@ -137,6 +168,7 @@
         <div class="row between hidden" id="tripCancel">
           <span></span><button class="linkbtn" onclick="cancelTrip()">이 기록 통째로 지우기</button>
         </div>
+        <button class="linkbtn" onclick="setTab('records')">지난 기록 보기 · 지연된 날 제외하기 →</button>
       </div>
 
       <div class="card">
@@ -152,17 +184,13 @@
             <div class="pair"><input id="sLine" placeholder="노선 (예: 4호선)"><input id="sUpdn" placeholder="방향 (상행/하행)"></div>
             <div class="pair"><input id="sDist" type="number" inputmode="numeric" placeholder="도보 거리 m"><input id="sMin" type="number" inputmode="numeric" placeholder="예상 분"></div>
             <div class="muted">도보는 거리만 넣으면 3.7 km/h로 분을 계산해요. 네이버와 같은 기준에서 시작해 내 기록으로 바뀝니다.
-              버스는 출발에 정류장 번호 5자리를 같이 적으면(예: 노원역1번출구 11211) 실시간을 정확히 찾아요.</div>
+              버스는 출발·도착에 정류장 번호 5자리(예: 11211)를 넣으면 실시간을 정확히 찾아요. 이름만 넣어도 찾아봐요.</div>
             <button class="primary" onclick="addSegment()">구간 추가</button>
           </div>
         </details>
       </div>
-
-      <div class="card">
-        <h2>최근 기록</h2>
-        <div id="tripList"></div>
-      </div>
     </div>
+    </div><!-- /paneRoutes -->
   </section>
   <footer class="muted">데이터: 서울열린데이터광장 · 공공데이터포털(서울특별시) · 카카오</footer>
 </main>
@@ -177,6 +205,7 @@ const KIND = { walk:["도보","--walk"], subway:["지하철","--subway"], transf
 const DAY_KO = "월화수목금토일", DAY_EN = "MTWTFSS";   // active_days: 월=0 … 일=6, '-'는 쉬는 날 (watch.py와 같은 규칙)
 let user = null, shownFor, routes = [], current = null, segments = [], trips = [], openTrip = null;
 let busy = false, skipTo = null, newDays = [1,1,1,1,1,0,0], lastSync = 0;
+let records = [], tab = location.hash === "#records" ? "records" : "routes";
 const $ = id => document.getElementById(id);
 const pad = n => String(n).padStart(2, "0");
 const hhmm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -211,16 +240,31 @@ sb.auth.onAuthStateChange((_, session) => {
 async function render() {
   $("auth").classList.toggle("hidden", !!user);
   $("app").classList.toggle("hidden", !user);
-  if (!user) { routes = []; current = null; segments = []; trips = []; openTrip = null; return; }
+  if (!user) { routes = []; current = null; segments = []; trips = []; openTrip = null; records = []; return; }
   $("who").textContent = user.email;
   lastSync = Date.now();
-  await Promise.all([loadTelegram(), loadRoutes()]);
+  showTab();
+  await Promise.all([loadTelegram(), loadRoutes(), tab === "records" ? loadRecords() : null]);
 }
 // 텔레그램 앱이나 다른 탭에서 돌아오면 연결 상태와 기록을 다시 읽는다 (봇 버튼으로 찍은 기록도 반영)
 async function refreshAll() {
   if (!user || Date.now() - lastSync < 3000) return;
   lastSync = Date.now();
-  await Promise.all([loadTelegram(), loadRoutes()]);
+  await Promise.all([loadTelegram(), loadRoutes(), tab === "records" ? loadRecords() : null]);
+}
+// ---------- 탭 (경로 / 기록) ----------
+function showTab() {
+  for (const [t, btn, pane] of [["routes", "tabRoutes", "paneRoutes"], ["records", "tabRecords", "paneRecords"]]) {
+    $(btn).setAttribute("aria-selected", String(tab === t));
+    $(pane).classList.toggle("hidden", tab !== t);
+  }
+}
+function setTab(t) {
+  tab = t; showTab(); window.scrollTo(0, 0);
+  try { history.replaceState(null, "", t === "records" ? "#records" : location.pathname + location.search); } catch {}
+  if (!user) return;
+  if (t === "records") loadRecords();
+  else if (current) selectRoute(current.id);   // 기록 탭에서 바꾼 제외 표시를 계산에 반영
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshAll(); });
 setInterval(() => { if (current && !document.hidden) { renderRoute(); renderTripState(); } }, 30000);
@@ -288,8 +332,22 @@ const daysStr = () => newDays.map((on, i) => on ? DAY_EN[i] : "-").join("");
 
 const KSTEP = { WALKING:["walk","도보"], SUBWAY:["subway","지하철"], BUS:["bus","버스"] };
 let found = null;
-// 버스 정류장은 "이름 번호" 한 칸에 적는다 (예: "노원역1번출구 11211"). 번호는 실시간 조회용, 이름은 표시용.
-const withArs = (name, ars) => /^\d{5}$/.test(ars || "") ? (name ? `${name} ${ars}` : ars) : name;
+// 버스 구간 저장: station_from = 승차 arsId, station_to = 하차 arsIdTo (watch.py가 5자리 번호로 실시간 조회).
+// 정류장 이름은 line 뒤 괄호에 남긴다: "1142 (노원역1번출구→노원구청)". watch.py route_match는 괄호·공백으로 나눠 노선 번호만 본다.
+// 승차 번호를 못 찾았으면 이름을 그대로 둬서 watch.py가 이름으로 찾게 한다.
+const isArs = v => /^\d{5}$/.test(v || "");
+function busFields(st) {
+  const line = st.line ? `${st.line}${st.from || st.to ? ` (${st.from || "?"}→${st.to || "?"})` : ""}` : null;
+  return isArs(st.arsId) ? [st.arsId, isArs(st.arsIdTo) ? st.arsIdTo : st.to ?? null, line] : [st.from ?? null, st.to ?? null, line];
+}
+// 표시용: 버스는 line 괄호의 이름 + 흐린 번호, 그 밖은 저장된 값 그대로
+function segPlaces(s) {
+  const m = s.kind === "bus" && /^(.*?)\s*\((.*)→(.*)\)$/.exec(s.line || "");
+  const num = v => isArs(v) ? ` <span class="muted">${v}</span>` : "";
+  return m ? { line: esc(m[1]), from: esc(m[2]) + num(s.station_from), to: esc(m[3]) + num(s.station_to) }
+           : { line: esc(s.line), from: stopHtml(s.station_from), to: stopHtml(s.station_to) };
+}
+const withArs = (name, ars) => isArs(ars) ? (name ? `${name} ${ars}` : ars) : name;   // 경로 카드 표시용
 const stopHtml = s => {   // 끝의 5자리 번호를 흐리게 (lookbehind는 옛 iOS Safari에서 문법 오류라 안 씀)
   const m = /^(.*?)\s*(\d{5})\s*$/.exec(s || "");
   return m && !/\d$/.test(m[1]) ? `${esc(m[1] || "정류장")} <span class="muted">${m[2]}</span>` : esc(s);
@@ -342,9 +400,10 @@ function segmentRows(r, routeId) {
     if (kind === "walk" && prevTransit && nextTransit) kind = "transfer";   // 교통수단 사이의 도보 = 환승
     const walkSec = st.distance ? Math.round(st.distance / 1000 / WALK_KMH * 3600) : st.time;  // 도보는 3.7km/h 기준에서 시작
     let sFrom = st.from || (idx === 0 ? found.from.name : null), sTo = st.to || (idx === r.steps.length-1 ? found.to.name : null);
-    if (kind === "bus") { sFrom = withArs(sFrom, st.arsId); sTo = withArs(sTo, st.arsIdTo); }   // watch.py는 station_from의 5자리 번호로 실시간 조회
+    let line = st.line ?? null;
+    if (kind === "bus") [sFrom, sTo, line] = busFields(st);
     rows.push({ route_id: routeId, seq: idx+1, kind, station_from: sFrom, station_to: sTo,
-      line: st.line ?? null, updn: null, distance_m: st.distance || null,
+      line, updn: null, distance_m: st.distance || null,
       expected_sec: Math.round((kind === "walk" || kind === "transfer") ? walkSec : st.time) });
     prevTransit = st.type !== "WALKING";
   });
@@ -363,7 +422,11 @@ async function selectRoute(id) {
   document.querySelectorAll("#routeList .route-btn").forEach(b => b.classList.toggle("sel", Number(b.dataset.id) === id));
 }
 function quantile(v, p) { v = [...v].sort((a,b)=>a-b); if (!v.length) return null; const pos=(v.length-1)*p, lo=Math.floor(pos), hi=Math.ceil(pos); return v[lo]+(v[hi]-v[lo])*(pos-lo); }
-const durations = () => trips.filter(t => t.ended_at).map(t => (new Date(t.ended_at) - new Date(t.started_at)) / 1000).filter(d => d >= 180 && d <= 3*3600);
+// 통계에 쓰는 기록: 도착까지 찍혔고, 사용자가 제외하지 않았고, 3분~3시간 (watch.py와 같은 기준)
+const tripSec = t => (new Date(t.ended_at) - new Date(t.started_at)) / 1000;
+const inRange = t => { const d = tripSec(t); return d >= 180 && d <= 3*3600; };
+const usable = t => !!t.ended_at && !t.excluded && inRange(t);
+const durations = () => trips.filter(usable).map(tripSec);
 function estimate() {
   const durs = durations();
   if (durs.length >= MIN_SAMPLES) return [Math.round(quantile(durs, current.confidence/100)), `내 기록 ${durs.length}회의 ${current.confidence}% 기준`];
@@ -385,10 +448,10 @@ function renderRoute() {
     : left > 0 ? `${left >= 60 ? `${Math.floor(left/60)}시간 ` : ""}${left % 60}분 남음` : left > -60 ? "출발 시각 지남" : "";
   $("rvBar").innerHTML = segments.map(s=>`<div style="flex:${s.expected_sec||1};background:var(${KIND[s.kind]?.[1]||"--walk"})"></div>`).join("");
   $("rvLegend").innerHTML = Object.entries(KIND).map(([k,[n,c]])=>`<span><i class="dot" style="background:var(${c})"></i>${n}</span>`).join("");
-  $("rvSegs").innerHTML = segments.map(s=>`<div class="seg"><i class="dot" style="background:var(${KIND[s.kind]?.[1]||"--walk"})"></i>
-    <div><b>${KIND[s.kind]?.[0]||esc(s.kind)}</b> ${stopHtml(s.station_from)} → ${stopHtml(s.station_to)} ${s.line?`· ${esc(s.line)} ${esc(s.updn)}`:""}
+  $("rvSegs").innerHTML = segments.map(s=>{ const p = segPlaces(s); return `<div class="seg"><i class="dot" style="background:var(${KIND[s.kind]?.[1]||"--walk"})"></i>
+    <div><b>${KIND[s.kind]?.[0]||esc(s.kind)}</b> ${p.from} → ${p.to} ${s.line?`· ${p.line} ${esc(s.updn)}`:""}
     <span class="muted">· ${Math.round((s.expected_sec||0)/60)}분${s.distance_m?` (${s.distance_m}m)`:""}</span></div>
-    <button class="icon" aria-label="구간 삭제" onclick="delSegment(${s.id})">✕</button></div>`).join("")
+    <button class="icon" aria-label="구간 삭제" onclick="delSegment(${s.id})">✕</button></div>`; }).join("")
     || `<div class="muted">구간을 추가하면 네이버처럼 막대가 생겨요.</div>`;
 }
 async function addSegment() {
@@ -447,15 +510,52 @@ function renderTrip() {
   $("btnSkip").disabled = $("btnEndNow").disabled = busy || f === "ended_at";
   $("btnUndo").disabled = busy;
   renderTripState();
-  const done = trips.filter(t => t.ended_at).slice(0, 10);
-  $("tripList").innerHTML = done.map(t => {
-    const d = new Date(t.started_at);
-    const exp = t.expected_sec ? ` <span class="muted">(예상 ${Math.round(t.expected_sec/60)})</span>` : "";
-    const walk = t.platform_at ? ` · 승강장까지 ${mins(t.started_at, t.platform_at)}분` : "";
-    const tr = t.transfer_off_at && t.transfer_on_at ? ` · 환승 ${mins(t.transfer_off_at, t.transfer_on_at)}분` : "";
-    return `<div class="seg"><div><b>${d.getMonth()+1}/${d.getDate()}</b> ${hhmm(d)} 출발 · 총 ${mins(t.started_at, t.ended_at)}분${exp}
-      <span class="muted">${walk}${tr}</span></div></div>`;
-  }).join("") || `<div class="muted">아직 기록이 없어요.</div>`;
+}
+
+// ---------- 기록 탭 ----------
+const REC_STEPS = [["started_at","🏠","출발"], ["platform_at","🚉","승강장"], ["boarded_at","🚇","탑승"],
+                   ["transfer_off_at","↘","환승 하차"], ["transfer_on_at","↗","환승 탑승"], ["ended_at","🎯","도착"]];
+async function loadRecords() {
+  const { data, error } = await sb.from("trips").select("*, routes(name)").order("started_at", { ascending:false }).limit(200);
+  if (error) { $("recList").innerHTML = `<div class="muted">기록을 못 불러왔어요: ${esc(error.message)}</div>`; return; }
+  records = data || [];
+  renderRecords();
+}
+function renderRecords() {
+  const used = records.filter(usable).length, off = records.filter(t => t.excluded).length;
+  $("recSummary").textContent = records.length
+    ? `${records.length}개 · 출발 시각 계산에 ${used}개 사용 · 제외 ${off}개` : "";
+  let lastDay = "";
+  $("recList").innerHTML = records.map(t => {
+    const d = new Date(t.started_at), day = `${d.getMonth()+1}월 ${d.getDate()}일 (${DAY_KO[(d.getDay()+6)%7]})`;
+    const head = day !== lastDay ? `<div class="dayhead">${day}</div>` : ""; lastDay = day;
+    const end = t.ended_at ? new Date(t.ended_at) : null;
+    const total = end ? `${mins(t.started_at, end)}분` : Date.now() - d < OPEN_MS ? "진행 중" : "도착 기록 없음";
+    const exp = end && t.expected_sec ? ` <span class="muted">(예상 ${Math.round(t.expected_sec/60)}분)</span>` : "";
+    const tag = t.excluded ? `<span class="tag">계산 제외</span>` : end && !inRange(t) ? `<span class="tag">3분~3시간 밖이라 계산 안 함</span>` : "";
+    let prev = null;
+    const steps = REC_STEPS.filter(([f]) => t[f]).map(([f, ic, label]) => {
+      const gap = prev ? ` +${mins(prev, t[f])}` : ""; prev = t[f];
+      return `<span>${ic} ${label} ${hhmm(new Date(t[f]))}${gap}</span>`;
+    }).join("");
+    return head + `<div class="rec${t.excluded ? " off" : ""}">
+      <div class="rec-top">
+        <div class="rec-main"><b>${esc(t.routes?.name || "경로 없음")}</b>${tag}
+          <div>${hhmm(d)} → ${end ? hhmm(end) : "—"} · <b>${total}</b>${exp}</div></div>
+        <button class="toggle" role="switch" aria-checked="${!!t.excluded}" onclick="toggleExclude(${t.id})">${t.excluded ? "✓ 제외됨" : "제외"}</button>
+      </div>
+      <div class="rec-steps">${steps}</div></div>`;
+  }).join("") || `<div class="muted">아직 기록이 없어요. 경로 탭에서 <b>집 출발</b>을 눌러 시작해요.</div>`;
+}
+// 지연·우회처럼 평소와 다른 날은 제외 → estimate()와 watch.py 계산에서 빠진다
+async function toggleExclude(id) {
+  const t = records.find(x => x.id === id); if (!t) return;
+  const v = !t.excluded;
+  t.excluded = v; renderRecords();                       // 먼저 바꿔 보여주고, 실패하면 되돌린다
+  const { error } = await sb.from("trips").update({ excluded: v }).eq("id", id);
+  if (error) { t.excluded = !v; renderRecords(); alert("바꾸지 못했어요: " + error.message); return; }
+  const c = trips.find(x => x.id === id);
+  if (c) { c.excluded = v; if (current) { renderRoute(); renderTrip(); } }
 }
 function renderTripState() {
   const n = durations().length;
@@ -469,7 +569,7 @@ function renderTripState() {
   if (r) {
     const total = mins(r.started_at, r.ended_at), exp = r.expected_sec ? Math.round(r.expected_sec / 60) : null;
     const diff = exp == null ? "" : total === exp ? " (예상과 같음)" : total > exp ? ` (예상보다 ${total - exp}분 더)` : ` (예상보다 ${exp - total}분 빨리)`;
-    $("tripState").innerHTML = `<b class="ok">도착 기록 완료</b> · 총 ${total}분${diff}<br>${prog}`;
+    $("tripState").innerHTML = `<b class="ok">도착 기록 완료</b> · 총 ${total}분${diff}${r.excluded ? " · 계산 제외" : ""}<br>${prog}`;
     return;
   }
   $("tripState").innerHTML = `집을 나설 때 <b>집 출발</b>을 누르고, 역 안에서는 단계마다 버튼을 눌러요.<br>${prog}`;

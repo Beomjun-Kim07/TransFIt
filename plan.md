@@ -116,7 +116,7 @@
 | API | 어디서 | 주소 | 입력값 | 쓸 값 경로 | 일일 한도 | 호출 간격 |
 |---|---|---|---|---|---|---|
 | 서울 지하철 실시간 도착 | 서울열린데이터광장 | `http://swopenapi.seoul.go.kr/api/subway/{키}/json/realtimeStationArrival/0/20/{역명}` | 역명 | `realtimeArrivalList[i].barvlDt`, `btrainNo`, `updnLine`, `trainLineNm` | 1,000 | 출발 직전 구간에만 호출 (경로당 하루 1~3회) |
-| 서울 버스 정류소별 도착 | 공공데이터포털 | `http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid?serviceKey={키}&arsId={정류장}&resultType=json` | 정류장 번호 | `msgBody.itemList[i].traTime1`(남은 초), `arrmsg1`, `rtNm`, `vehId1` (이 서비스엔 `exps1` 없음) | 1,000 | 위와 같음 |
+| 서울 버스 정류소별 도착 | 공공데이터포털 | `http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid?serviceKey={키}&arsId={정류장}&resultType=json` | 정류장 번호 | `msgBody.itemList[i].traTime1`/`traTime2`(첫째·둘째 버스까지 초), `arrmsg1`, `rtNm`, `vehId1` (이 서비스엔 `exps1` 없음) | 1,000 | 위와 같음 |
 | 서울 버스 정류소 번호 찾기 | 공공데이터포털 (정류소정보조회) | `getStationByPos`(좌표→번호, route 함수), `getStationByName`(이름→번호, watch.py) | 좌표 또는 정류장 이름 | `msgBody.itemList[i].arsId` | 1,000 | 경로 저장 시 1회, 번호 없는 구간만 |
 | 카카오 대중교통·도보 길찾기 | 카카오디벨로퍼스 | (카카오맵 REST) | 출발·도착 좌표 | 총 소요 초, 구간 목록 | 각 1,000 | 경로 등록 시 1회, 이후 하루 1회 |
 | 카카오 로컬 키워드 검색 | 카카오디벨로퍼스 | `https://dapi.kakao.com/v2/local/search/keyword.json` | query | `documents[i].x, y` | 100,000 | 장소 등록 시만 |
@@ -136,7 +136,9 @@
 - 적는 값: route_id, date, kind, sent_at
 
 ## 설정 화면 (배포 URL)
-- 화면 1장: 경로 등록(출발·환승·도착·마감 시각) + 오늘 출발 권장 시각 + 출발/열차 탐/도착 기록 버튼
+- 화면 1장, 탭 2개
+  - 경로 탭: 텔레그램 연결, 경로 등록(출발·도착·마감 시각·요일 → 카카오 길찾기 → 구간 자동 생성) + 오늘 출발 권장 시각 + 단계별 기록 버튼(집 출발 → 승강장/정류장 → 탑승 → 환승 → 도착)
+  - 기록 탭: 지난 기록(경로·날짜·출발→도착·총 소요·단계별 시각). 지연·우회한 날은 "제외"로 빼면 출발 시각 계산(웹·watch.py)에서 빠진다
 
 ## 비틀기
 - 원본에 없는 것: 사용자별 실제 기록으로 학습하는 소요시간(평균이 아닌 분위수), 도착 마감 기준 출발 시각 역산, 능동 알림
