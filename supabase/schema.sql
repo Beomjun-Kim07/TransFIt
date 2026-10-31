@@ -9,8 +9,12 @@ create table users (
   email text,
   telegram_chat_id bigint unique,
   link_code text unique,            -- 봇 연결용 일회 코드 (t.me/봇?start=코드)
+  api_token text unique default replace(gen_random_uuid()::text, '-', ''),  -- 단축어·앱 자동 기록용 (Edge Function trip)
   created_at timestamptz default now()
 );
+
+-- 기존 DB에 api_token 추가할 때 (한 번만):
+-- alter table users add column if not exists api_token text unique default replace(gen_random_uuid()::text, '-', ''); update users set api_token = replace(gen_random_uuid()::text, '-', '') where api_token is null;
 
 -- 로그인하면 users 행을 자동으로 만든다
 create or replace function public.handle_new_user() returns trigger
