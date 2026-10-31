@@ -2,8 +2,10 @@
 #
 # 수첩은 state.json 대신 Supabase notifications 테이블을 쓴다.
 # 환경변수: SUPABASE_URL, SUPABASE_SERVICE_KEY, BOT_TOKEN, SUBWAY_KEY, BUS_KEY
-# TEST=1 로 실행하면 시간 조건과 무관하게 오늘 계산 결과를 바로 보낸다 (수첩에는 안 적는다).
-#   실제와 같은 두 통: pre('출발했어요' 버튼, callback trip:start:<route_id>) + live(버튼 없음).
+# 알림 두 통:
+#   pre  (출발 lead_min 전) "🚶 21:50 도착하려면 21:25에 출발하세요" / "예상 25분 · 근거" / 구간 요약 + '출발했어요' 버튼(trip:start:<route_id>)
+#   live (출발 ±10분)       "🚇 지금 출발하면: 4호선 3분·9분 뒤 도착 / 472번 5분 뒤" — 그 역·정류장에 닿은 뒤 대기 시간, 버튼 없음
+# TEST=1 로 실행하면 시간 조건과 무관하게 오늘 계산 결과로 위 두 통을 바로 보낸다 (수첩에는 안 적는다).
 # TEST_SEGMENTS=구간.json 을 같이 주면 DB 구간 대신 그 파일의 구간으로 실시간 줄을 만든다 (시험용, DB는 안 건드림).
 # TEST일 때 텔레그램 미연결 사용자는 CHAT_ID(개발자 채팅, .env.local)로 대신 보낸다.
 
@@ -23,7 +25,7 @@ except ImportError:
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")   # report.py는 텔레그램 없이 이 파일을 가져다 쓴다
 SUBWAY_KEY = os.environ.get("SUBWAY_KEY", "")
 BUS_KEY_RAW = os.environ.get("BUS_KEY", "")
 BUS_KEY = unquote(BUS_KEY_RAW)   # 공공데이터포털 '인코딩' 키를 풀어 둔다 (requests가 params로 다시 인코딩)
@@ -53,6 +55,7 @@ MIN_SEC_RE = re.compile(r"(\d+)\s*분(?:\s*(\d+)\s*초)?")   # '6분 30초 후',
 TLN_RE = re.compile(r"\s*(.+?)행\s*-\s*(.+?)방면")          # '성수행 - 홍대입구방면' → (종착, 다음 역)
 STATIONS_AWAY_RE = re.compile(r"\[(\d+)\]번째 전역")         # '[14]번째 전역 (안양)'
 SEC_PER_STATION = 120         # 남은 시간이 안 오고 역 수만 올 때 역당 추정 초
+WALK_MPS = 3.7 * 1000 / 3600  # 도보 3.7 km/h (네이버 상수) — 시간 없이 거리만 있는 도보 구간 요약용
 
 # ---------- 키 가리기 ----------
 _SECRETS = sorted({s for s in (SUPABASE_KEY, BOT_TOKEN, SUBWAY_KEY, BUS_KEY_RAW, BUS_KEY, quote(BUS_KEY, safe="")) if s},
@@ -105,13 +108,13 @@ def start_buttons(route_id):
     trips 행(started_at=지금)을 만들고 다음 단계 버튼을 이어 보낸다."""
     return [[{"text": "출발했어요", "callback_data": f"trip:start:{route_id}"}]]
 
-def send_pre(chat_id, route_id, head, lead, suffix=""):
-    """알림 1 (출발 lead분 전) — 버튼 있음."""
-    return send(chat_id, head + f"\n{lead}분 뒤 출발이에요." + suffix, start_buttons(route_id))
+def send_pre(chat_id, route_id, text):
+    """알림 1 (출발 lead분 전) — '출발했어요' 버튼 있음."""
+    return send(chat_id, text, start_buttons(route_id))
 
-def send_live(chat_id, head, lines, suffix=""):
-    """알림 2 (출발 시각, 실시간 보정) — 버튼 없음."""
-    return send(chat_id, head + "\n지금 나갈 시간이에요." + ("\n" + "\n".join(lines) if lines else "") + suffix)
+def send_live(chat_id, text):
+    """알림 2 (출발 시각, 실시간) — 버튼 없음."""
+    return send(chat_id, text)
 
 # ---------- 통계 (조연준 Estimator.quantile과 같은 선형보간 분위수) ----------
 def quantile(values, p):
@@ -122,28 +125,113 @@ def quantile(values, p):
     lo, hi = math.floor(pos), math.ceil(pos)
     return v[lo] + (v[hi] - v[lo]) * (pos - lo)
 
-def estimate_duration(route, segments, trips):
-    """(초, 근거 문자열) — 기록이 충분하면 개인 분위수, 아니면 기준값."""
+def parse_ts(s):
+    """Supabase 시각 문자열 → datetime. 소수 초 자릿수가 6이 아니어도(파이썬 3.10 이하 fromisoformat 실패) 읽는다."""
+    s = str(s).replace("Z", "+00:00")
+    m = re.match(r"(.*T\d\d:\d\d:\d\d)\.(\d+)(.*)$", s)
+    if m:
+        s = f"{m.group(1)}.{(m.group(2) + '000000')[:6]}{m.group(3)}"
+    return datetime.fromisoformat(s)
+
+def usable_durations(trips):
+    """계산에 쓰는 기록(초) = 도착까지 찍힘 + excluded 아님 + 3분~3시간 (3분 미만·3시간 초과는 오작동으로 본다)."""
     durs = []
     for t in trips:
-        if t.get("excluded"):              # 사용자가 '이 기록 빼기' 한 행 (지연·우회 등)
+        if t.get("excluded") or not (t.get("started_at") and t.get("ended_at")):   # excluded = 사용자가 뺀 기록
             continue
-        if t["ended_at"] and t["started_at"]:
-            s = datetime.fromisoformat(t["started_at"].replace("Z", "+00:00"))
-            e = datetime.fromisoformat(t["ended_at"].replace("Z", "+00:00"))
-            d = (e - s).total_seconds()
-            if 180 <= d <= 3 * 3600:      # 3분 미만·3시간 초과는 오작동으로 본다
-                durs.append(d)
-    p = route["confidence"] / 100
+        d = (parse_ts(t["ended_at"]) - parse_ts(t["started_at"])).total_seconds()
+        if 180 <= d <= 3 * 3600:
+            durs.append(d)
+    return durs
+
+LATER = "(기록 쌓이면 바뀜)"
+
+def estimate_duration(route, segments, trips):
+    """(초, 근거 문구) — 기록이 충분하면 개인 분위수, 아니면 기준값. 근거 문구는 pre 알림 둘째 줄에 그대로 나간다."""
+    durs = usable_durations(trips)
     if len(durs) >= MIN_SAMPLES:
-        q = quantile(durs, p)
-        return int(q), f"내 기록 {len(durs)}회의 {route['confidence']}% 기준"
-    seg_sum = sum(s["expected_sec"] or 0 for s in segments)
-    if route.get("baseline_sec"):
-        return int(route["baseline_sec"]), f"기준 경로 (지도 API) · 기록 {len(durs)}/{MIN_SAMPLES}회"
+        return int(quantile(durs, route["confidence"] / 100)), f"내 기록 {len(durs)}회 {route['confidence']}% 기준"
+    if route.get("baseline_sec"):                  # 웹이 길찾기로 저장할 때 카카오 totalTime을 넣는다
+        return int(route["baseline_sec"]), f"카카오 예상 기준{LATER}"
+    seg_sum = sum(s.get("expected_sec") or 0 for s in segments)
     if seg_sum:
-        return int(seg_sum), f"구간 예상치 합 · 기록 {len(durs)}/{MIN_SAMPLES}회"
-    return route["fallback_min"] * 60, "기본 소요시간"
+        return int(seg_sum), f"구간 예상 합 기준{LATER}"
+    return route["fallback_min"] * 60, f"기본값 기준{LATER}"
+
+def plan(route, segments, trips, day):
+    """(도착, 출발, 소요 분, 근거). 소요를 분 단위로 올려 '예상 N분'과 출발 시각이 1분도 어긋나지 않게 한다."""
+    dur, basis = estimate_duration(route, segments, trips)
+    mins = math.ceil(dur / 60)
+    hh, mm = map(int, str(route["arrive_by"]).split(":")[:2])
+    arrive = datetime.combine(day, time(hh, mm), tzinfo=KST)
+    return arrive, arrive - timedelta(minutes=mins), mins, basis
+
+# ---------- 알림 문구 ----------
+def line_label(line, sid=""):
+    """'수도권 4호선' → '4호선', '경의중앙선' 그대로. 노선명이 없으면 subwayId로."""
+    s = re.sub(r"^\s*수도권\s*", "", line or "").strip()
+    if not s and sid:
+        s = next((k for k, v in LINE_ID.items() if v == sid), "")
+    m = re.search(r"(?<!인천)([1-9])\s*호선", s)
+    return f"{m.group(1)}호선" if m else (s or "지하철")
+
+BUS_LINE_RE = re.compile(r"^\s*(.*?)\s*\((.*)\)\s*$")       # '1142 (노원역1번출구→노원구청)'
+
+def stop_name(v):
+    """'노원역 11234' → '노원역', '11234' → '' (번호만 있으면 이름 없음)."""
+    return re.sub(r"\s*(?<!\d)\d{5}\s*$", "", (v or "").strip())
+
+def bus_label(seg):
+    """'1142 (노원역1번출구→노원구청)' → '1142번'."""
+    m = BUS_LINE_RE.match(seg.get("line") or "")
+    no = (m.group(1) if m else (seg.get("line") or "")).strip().rstrip("번")
+    return f"{no}번" if no else "버스"
+
+def seg_label(seg):
+    return bus_label(seg) if seg.get("kind") == "bus" else line_label(seg.get("line"))
+
+def seg_summary(s):
+    """구간 하나 → '도보 7분' / '4호선 노원→사당' / '환승' / '1142번 노원역1번출구→노원구청'. 보일 게 없으면 None."""
+    kind = s.get("kind")
+    if kind == "walk":
+        sec = s.get("expected_sec") or (s.get("distance_m") or 0) / WALK_MPS
+        return f"도보 {max(1, round(sec / 60))}분" if sec else None
+    if kind == "transfer":
+        return "환승"
+    if kind == "subway":
+        a, b = norm_station(s.get("station_from")), norm_station(s.get("station_to"))
+        return " ".join(x for x in (line_label(s.get("line")), "→".join(x for x in (a, b) if x)) if x)
+    if kind == "bus":
+        m = BUS_LINE_RE.match(s.get("line") or "")
+        names = m.group(2) if m else "→".join(x for x in (stop_name(s.get("station_from")), stop_name(s.get("station_to"))) if x)
+        return " ".join(x for x in (bus_label(s), names) if x)
+    return None
+
+def route_summary(segments):
+    return " → ".join(t for t in map(seg_summary, segments) if t)
+
+def pre_text(arrive, depart, mins, basis, segments):
+    """pre 알림: 출발 시각 / 예상 소요·근거 / 구간 요약."""
+    lines = [f"🚶 {arrive:%H:%M} 도착하려면 {depart:%H:%M}에 출발하세요", f"예상 {mins}분 · {basis}"]
+    summary = route_summary(segments)
+    return "\n".join(lines + ([summary] if summary else []))
+
+def live_item(kind, label, waits=(), rough=False, note=None):
+    """실시간 한 항목. waits = 그 역·정류장에 닿은 뒤 대기 초(빠른 순, 최대 2대), note = 대기 대신 보일 말."""
+    return {"kind": kind, "label": label, "waits": list(waits), "rough": rough, "note": note}
+
+def live_item_txt(it, first):
+    if it["note"]:
+        return f"{it['label']} {it['note']}"
+    ts = "·".join(wait_txt(s) for s in it["waits"])
+    return f"{it['label']} {'약 ' if it['rough'] else ''}{ts} 뒤" + (" 도착" if first else "")
+
+def live_text(items):
+    """live 알림: '🚇 지금 출발하면: 4호선 3분·9분 뒤 도착 / 472번 5분 뒤'."""
+    if not items:
+        return "🚶 지금 출발하세요 (실시간 정보 없음)"
+    icon = "🚌" if items[0]["kind"] == "bus" else "🚇"
+    return f"{icon} 지금 출발하면: " + " / ".join(live_item_txt(it, i == 0) for i, it in enumerate(items))
 
 # ---------- 공통: 시각·문구 ----------
 def age_sec(stamp, now):
@@ -157,10 +245,6 @@ def age_sec(stamp, now):
 def wait_txt(sec):
     m = int(sec) // 60
     return f"{m}분" if m else "1분 미만"
-
-def lead_txt(first, offset, place):
-    """첫 승차 지점이면 '지금 나가면 ○○ 도착 후', 환승 지점이면 도착 예상 시각까지 붙인다."""
-    return f"지금 나가면 {place} 도착 후" if first else f"환승 {place}: 약 {offset // 60}분 뒤 도착 후"
 
 # ---------- 실시간 지하철 ----------
 def norm_station(name):
@@ -247,10 +331,9 @@ def subway_eta(a, now):
             return None
     return sec - age_sec(a.get("recptnDt"), now)
 
-def eta_txt(a, sec):
-    """barvlDt 없이 추정한 값이면 '약'을 붙인다."""
-    rough = int(a.get("barvlDt") or 0) <= 0 and str(a.get("arvlCd") or "") not in ("0", "1")
-    return ("약 " if rough else "") + wait_txt(sec)
+def is_rough(a):
+    """barvlDt 없이 역 수·문구로 추정한 남은 시간이면 True → 문구에 '약'."""
+    return int(a.get("barvlDt") or 0) <= 0 and str(a.get("arvlCd") or "") not in ("0", "1")
 
 def timed_trains(trains, now):
     """[(남은 초, 열차)] 빨리 오는 순. 남은 시간을 모르는 열차는 뺀다."""
@@ -328,8 +411,13 @@ def drop_short_turn(trains, b_ids):
         keep.append(a)
     return keep
 
+def catch_item(label, catch, offset):
+    """잡을 수 있는 열차 [(남은 초, 열차)] → 대기 시간 항목 (최대 2대)."""
+    catch = catch[:2]
+    return live_item("subway", label, [e - offset for e, _ in catch], any(is_rough(a) for _, a in catch))
+
 def subway_live(seg, offset, now, first):
-    """지하철 구간 하나: 지금 나가서 이 역에 닿는 시각(offset초 뒤) 이후 첫 열차."""
+    """지하철 구간 하나 → 실시간 항목들. 지금 나가서 이 역에 닿는 시각(offset초 뒤) 이후 열차를 대기 시간으로."""
     lid = line_id(seg.get("line"))
     a_name, arr = station_arrivals(seg.get("station_from"), lid)
     b_name, b_arr = station_arrivals(seg.get("station_to"), lid) if seg.get("station_to") else ("", [])
@@ -337,9 +425,10 @@ def subway_live(seg, offset, now, first):
         common = {a.get("subwayId") for a in arr} & {b.get("subwayId") for b in b_arr}
         arr = [a for a in arr if a.get("subwayId") in common] or arr
     b_ids = station_ids(b_arr)
-    place = f"{a_name or seg.get('station_from')}역"
+    label = line_label(seg.get("line"), lid or (arr[0].get("subwayId") if arr else ""))
+    note = lambda msg: [live_item("subway", label, note=msg)] if first else []   # 뒤 환승 구간은 못 잡으면 생략
     if not arr:
-        return [f"{place} {seg.get('line') or ''} 열차 정보 없음"] if first else []
+        return note("열차 정보 없음")
 
     if seg.get("updn"):
         # updnLine은 상행/하행/내선/외선 — 웹에서 '내선순환', '상행선'처럼 적어도 맞게
@@ -348,31 +437,27 @@ def subway_live(seg, offset, now, first):
         trains, basis = pick_direction(arr, b_name, b_ids)
     print(f"    지하철 {a_name}→{b_name or '?'} {seg.get('line') or ''}: 방향 근거 = {basis}")
 
-    if trains is None:                             # 방향 미확정 → 방향마다 한 줄 (섞어서 틀린 열차를 고르지 않게)
+    if trains is None:                             # 방향 미확정 → 방향마다 한 항목 (섞어서 틀린 열차를 고르지 않게)
         groups = defaultdict(list)
         for a in drop_short_turn(arr, b_ids):
-            groups[parse_tln(a)[1] or a.get("updnLine")].append(a)
+            nxt = parse_tln(a)[1]
+            groups[f"{nxt}방면" if nxt else (a.get("updnLine") or "?")].append(a)
         out = []
-        for g in groups.values():
+        for way, g in groups.items():
             catch = [(e, a) for e, a in timed_trains(g, now) if e >= offset]
             if catch:
-                e, a = catch[0]
-                out.append(f"방향 미확정 · {lead_txt(first, offset, place)} 대기 {eta_txt(a, e - offset)} · {a.get('trainLineNm')}")
-        return out if (out or not first) else [f"{place} 방향 미확정 · 잡을 수 있는 열차 없음"]
+                out.append(catch_item(f"{label} {way}", catch, offset))
+        return out or note("방향 미확정 · 잡을 수 있는 열차 없음")
 
     timed = timed_trains(drop_short_turn(trains, b_ids), now)
     for e, a in timed:
         print(f"      {a.get('trainLineNm')} 열차 {a.get('btrainNo')} {e}초 ({a.get('arvlMsg2')})")
     if not timed:
-        return [f"{place} {seg.get('line') or ''} 열차 정보 없음"] if first else []
+        return note("열차 정보 없음")
     catch = [(e, a) for e, a in timed if e >= offset]
     if catch:
-        e, a = catch[0]
-        return [f"{lead_txt(first, offset, place)} 대기 {eta_txt(a, e - offset)} · {a.get('trainLineNm')}"]
-    if not first:
-        return []
-    a = timed[-1][1]
-    return [f"{place} 다음 열차({a.get('arvlMsg2')})는 놓칠 가능성 큼 · 그다음 열차 기준으로 준비하세요"]
+        return [catch_item(label, catch, offset)]
+    return note("보이는 열차는 놓칠 듯 · 다음 열차 기준")
 
 # ---------- 실시간 버스 (서울 버스, 공공데이터포털) ----------
 def bus_get(op, **params):
@@ -460,42 +545,42 @@ def pick_bus_stop(entries, seg):
     return ([best[1]], "노선 정류장 순서") if best else (entries, "방향 판정 실패")
 
 def bus_live(seg, offset, now, first):
-    """버스 구간 하나: 지금 나가서 이 정류장에 닿는 시각(offset초 뒤) 이후 첫 버스."""
+    """버스 구간 하나 → 실시간 항목들. 지금 나가서 이 정류장에 닿는 시각(offset초 뒤) 이후 버스를 대기 시간으로."""
     entries = []
     for group in bus_stop_ids(seg):                # 이름 정확히 같은 정류장부터, 그 노선이 없으면 나머지 후보
         entries = [it for ars in group
                    for it in bus_get("stationinfo/getStationByUid", arsId=ars) if route_match(it.get("rtNm"), seg.get("line"))]
         if entries:
             break
-    stop, line = seg.get("station_from") or "정류장", seg.get("line") or "버스"
+    stop = seg.get("station_from") or "정류장"
     if not entries:
-        return [f"{stop} {line} 버스 정보 없음"] if first else []
+        return [live_item("bus", bus_label(seg), note="버스 정보 없음")] if first else []
     if seg.get("line"):
         picked, basis = pick_bus_stop(entries, seg)
     else:                                          # 노선을 모르면 그 정류장 버스 중 빨리 오는 3개
         soon = lambda e: (lambda x: 1e9 if x is None else x)(bus_eta(e, 1, now))
         picked, basis = sorted(entries, key=soon)[:3], "노선 미지정"
-    print(f"    버스 {stop}→{seg.get('station_to') or '?'} {line}: 정류장 근거 = {basis}")
+    print(f"    버스 {stop}→{seg.get('station_to') or '?'} {seg.get('line') or ''}: 정류장 근거 = {basis}")
     out = []
     for e in picked:
         print(f"      {e.get('rtNm')} {e.get('stNm')}({e.get('arsId')}) {e.get('adirection')}방향 "
               f"vehId1={e.get('vehId1')} traTime1={e.get('traTime1')} ({e.get('arrmsg1')})")
-        place = f"{e.get('stNm') or stop} 정류장"
-        tag = f"{e.get('rtNm')}번" + (f" ({e.get('adirection')} 방향)" if len(picked) > 1 and e.get("adirection") else "")
+        label = (f"{e['rtNm']}번" if e.get("rtNm") else bus_label(seg)) + \
+                (f"({e['adirection']} 방향)" if len(picked) > 1 and e.get("adirection") else "")
         etas = sorted(x for x in (bus_eta(e, 1, now), bus_eta(e, 2, now)) if x is not None)
-        catch = [x for x in etas if x >= offset]
+        catch = [x for x in etas if x >= offset][:2]
         if catch:
-            out.append(f"{lead_txt(first, offset, place)} 대기 {wait_txt(catch[0] - offset)} · {tag}")
+            out.append(live_item("bus", label, [x - offset for x in catch]))
         elif first and etas:
-            out.append(f"{place} {tag} 다음 버스({e.get('arrmsg1')})는 놓칠 가능성 큼 · 그다음 버스 기준으로 준비하세요")
+            out.append(live_item("bus", label, note="보이는 버스는 놓칠 듯 · 다음 버스 기준"))
         elif first:
-            out.append(f"{place} {tag} 도착 정보 없음 ({e.get('arrmsg1') or '-'})")
+            out.append(live_item("bus", label, note=e.get("arrmsg1") or "도착 정보 없음"))   # '운행종료' 등
     return out
 
 # ---------- 실시간 묶음 ----------
 def live_lines(segments, now):
-    """구간을 순서대로 따라가며, 지금 나가면 각 승차 지점에 닿는 시각 이후 첫 열차·버스를 고른다.
-    첫 승차 구간은 항상 한 줄, 뒤 환승 구간은 잡을 수 있는 차가 보일 때만."""
+    """구간을 순서대로 따라가며, 지금 나가면 각 승차 지점에 닿는 시각 이후 열차·버스를 고른다 → 항목 목록(live_item).
+    첫 승차 구간은 항상 한 항목, 뒤 환승 구간은 잡을 수 있는 차가 보일 때만."""
     out, offset, first = [], 0, True
     for seg in segments:
         kind = seg.get("kind")
@@ -506,7 +591,7 @@ def live_lines(segments, now):
                 except Exception as e:
                     print(f"    {kind} 실시간 실패: {redact(e)}")
                     if first:
-                        out.append(f"({'지하철' if kind == 'subway' else '버스'} 실시간 조회 실패: {redact(e)})")
+                        out.append(live_item(kind, seg_label(seg), note="실시간 조회 실패"))
             first = False
         offset += seg.get("expected_sec") or 0
     return out
@@ -538,24 +623,20 @@ def main():
             segments = sb_get("segments", {"route_id": f"eq.{route['id']}", "order": "seq"})
         since = (now - timedelta(days=LOOKBACK_DAYS)).isoformat()
         trips = fetch_trips(route["id"], since)
-        dur, basis = estimate_duration(route, segments, trips)
-
-        hh, mm = map(int, route["arrive_by"].split(":")[:2])
-        arrive = datetime.combine(today, time(hh, mm), tzinfo=KST)
-        depart = arrive - timedelta(seconds=dur)
+        arrive, depart, mins, basis = plan(route, segments, trips, today)
         lead = route.get("lead_min") or 30
-        print(f"  route {route['id']} '{route['name']}': 도착 {arrive:%H:%M} / 소요 {dur//60}분 ({basis}) / 출발 {depart:%H:%M}")
-
-        head = f"[TransFit] {route['name']}\n도착 목표 {arrive:%H:%M} · 출발 권장 {depart:%H:%M}\n소요 {dur//60}분 — {basis}"
+        print(f"  route {route['id']} '{route['name']}': 도착 {arrive:%H:%M} / 소요 {mins}분 ({basis}, "
+              f"쓸 수 있는 기록 {len(usable_durations(trips))}회) / 출발 {depart:%H:%M}")
+        pre_msg = pre_text(arrive, depart, mins, basis, segments)
 
         if TEST:   # 실제 알림과 같은 함수로 pre(버튼) · live(버튼 없음) 두 통
-            lines = live_lines(segments, now)
-            for l in lines:
+            live_msg = live_text(live_lines(segments, now))
+            for l in (pre_msg + "\n" + live_msg).split("\n"):
                 print("    |", l)
-            res = send_pre(chat_id, route["id"], head, lead, "\n(테스트 실행)")
+            res = send_pre(chat_id, route["id"], pre_msg + "\n(테스트 실행)")
             kb = ((res.get("result") or {}).get("reply_markup") or {}).get("inline_keyboard") or []
             print("    TEST pre 발송 · 버튼:", [(b.get("text"), b.get("callback_data")) for row in kb for b in row] or "없음")
-            res = send_live(chat_id, head, lines, "\n(테스트 실행)")
+            res = send_live(chat_id, live_msg + "\n(테스트 실행)")
             print("    TEST live 발송 · 버튼:", "있음" if (res.get("result") or {}).get("reply_markup") else "없음")
             continue
 
@@ -566,9 +647,9 @@ def main():
                                                    "date": today.isoformat(), "kind": "pre"}, "route_id,date,kind")
                 already = sb_get("notifications", {"route_id": f"eq.{route['id']}", "date": f"eq.{today}", "kind": "eq.pre", "select": "sent_at"})
                 # ignore-duplicates라 새로 들어갔는지 알 수 없어 sent_at으로 판정: 방금 생긴 행이면 보낸다
-                sent_at = datetime.fromisoformat(already[0]["sent_at"].replace("Z", "+00:00"))
+                sent_at = parse_ts(already[0]["sent_at"])
                 if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
-                    send_pre(chat_id, route["id"], head, lead)
+                    send_pre(chat_id, route["id"], pre_msg)
                     print("    pre 발송 (출발했어요 버튼)")
             except Exception as e:
                 print("    pre 실패:", redact(e))
@@ -579,9 +660,9 @@ def main():
                 sb_insert_ignore("notifications", {"user_id": route["user_id"], "route_id": route["id"],
                                                    "date": today.isoformat(), "kind": "live"}, "route_id,date,kind")
                 already = sb_get("notifications", {"route_id": f"eq.{route['id']}", "date": f"eq.{today}", "kind": "eq.live", "select": "sent_at"})
-                sent_at = datetime.fromisoformat(already[0]["sent_at"].replace("Z", "+00:00"))
+                sent_at = parse_ts(already[0]["sent_at"])
                 if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
-                    send_live(chat_id, head, live_lines(segments, now))
+                    send_live(chat_id, live_text(live_lines(segments, now)))
                     print("    live 발송")
             except Exception as e:
                 print("    live 실패:", redact(e))

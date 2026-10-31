@@ -1,0 +1,39 @@
+name: report
+
+on:
+  schedule:
+    - cron: "50 14 * * *"   # 매일 23:50 KST (= 14:50 UTC)
+  workflow_dispatch:         # Actions 탭에서 수동 실행
+
+permissions:
+  contents: write            # docs/notebook.md 커밋·push
+
+concurrency:
+  group: report
+  cancel-in-progress: false
+
+jobs:
+  notebook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python report.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      - name: docs/notebook.md만 커밋 (바뀐 게 없으면 건너뜀)
+        run: |
+          git add docs/notebook.md
+          if git diff --cached --quiet; then
+            echo "docs/notebook.md 변경 없음 — 커밋 건너뜀"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "notebook: $(TZ=Asia/Seoul date +%F) 알림 수첩"
+          git pull --rebase
+          git push
