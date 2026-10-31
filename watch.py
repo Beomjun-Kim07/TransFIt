@@ -78,6 +78,17 @@ def sb_insert_ignore(table, row, on_conflict):
                       params={"on_conflict": on_conflict}, data=json.dumps(row), timeout=15)
     r.raise_for_status()
 
+def fetch_trips(route_id, since):
+    """최근 기록. excluded 컬럼이 아직 DB에 없으면(400, 42703) 그 컬럼 없이 다시 조회해 알림이 멈추지 않게 한다."""
+    params = {"route_id": f"eq.{route_id}", "started_at": f"gte.{since}", "select": "started_at,ended_at,excluded"}
+    try:
+        return sb_get("trips", params)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 400 and "excluded" in e.response.text:
+            print("    trips.excluded 컬럼 없음 → 제외 표시 없이 조회")
+            return sb_get("trips", dict(params, select="started_at,ended_at"))
+        raise
+
 # ---------- 텔레그램 ----------
 def send(chat_id, text):
     r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -97,6 +108,8 @@ def estimate_duration(route, segments, trips):
     """(초, 근거 문자열) — 기록이 충분하면 개인 분위수, 아니면 기준값."""
     durs = []
     for t in trips:
+        if t.get("excluded"):              # 사용자가 '이 기록 빼기' 한 행 (지연·우회 등)
+            continue
         if t["ended_at"] and t["started_at"]:
             s = datetime.fromisoformat(t["started_at"].replace("Z", "+00:00"))
             e = datetime.fromisoformat(t["ended_at"].replace("Z", "+00:00"))
@@ -506,7 +519,7 @@ def main():
         else:
             segments = sb_get("segments", {"route_id": f"eq.{route['id']}", "order": "seq"})
         since = (now - timedelta(days=LOOKBACK_DAYS)).isoformat()
-        trips = sb_get("trips", {"route_id": f"eq.{route['id']}", "started_at": f"gte.{since}", "select": "started_at,ended_at"})
+        trips = fetch_trips(route["id"], since)
         dur, basis = estimate_duration(route, segments, trips)
 
         hh, mm = map(int, route["arrive_by"].split(":")[:2])

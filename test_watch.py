@@ -20,6 +20,21 @@ ok(w.line_id("수도권 4호선") == "1004" and w.line_id("신분당선") == "10
 ok(w.id_dist("1002", 1002000243, 1002000201) == 1 and w.id_dist("1002", 1002000211, 1002000222) == 11, "2호선 순환 거리")
 ok(w.route_match("146", "간선 146") and w.route_match("146", "146번") and not w.route_match("1460", "146"), "route_match")
 
+print("== 소요시간: excluded 기록 제외")
+def trip(minutes, excluded=None):
+    t = {"started_at": "2026-10-30T08:00:00+09:00", "ended_at": f"2026-10-30T{8 + minutes // 60:02d}:{minutes % 60:02d}:00+09:00"}
+    if excluded is not None:
+        t["excluded"] = excluded
+    return t
+route = {"confidence": 90, "baseline_sec": 3000, "fallback_min": 40}
+five = [trip(40), trip(42), trip(45, False), trip(41), trip(43)]
+q90 = int(w.quantile([m * 60 for m in (40, 42, 45, 41, 43)], 0.9))
+sec, why = w.estimate_duration(route, [], five + [trip(110, True)])     # 110분 지연 기록은 뺀 것
+ok(sec == q90 and "5회" in why, f"excluded=true 행 제외 → {sec // 60}분 ({why})")
+sec, why = w.estimate_duration(route, [], five[:4] + [trip(43, True)])  # 정상 4회 + 제외 1회 → 기록 부족
+ok(sec == 3000 and "4/5" in why, f"제외하면 4회라 기준값 사용 ({why})")
+ok(w.estimate_duration(route, [], five)[0] == q90, "excluded 키가 없는 행(컬럼 없음)·false는 그대로 사용")
+
 print("== 방향 판정 (가짜 데이터)")
 def tr(sid, upd, tln, cur, nxt, term, bar="120", no="1"):
     return dict(subwayId=sid, updnLine=upd, trainLineNm=tln, statnId=str(cur), statnTid=str(nxt), bstatnId=str(term),
@@ -77,6 +92,11 @@ print("== 키 가리기")
 leak = f"http://x/{w.SUBWAY_KEY}/json?serviceKey={w.quote(w.BUS_KEY, safe='')}&t={w.BOT_TOKEN}"
 r = w.redact(leak)
 ok(all(k not in r for k in (w.SUBWAY_KEY, w.BUS_KEY, w.BUS_KEY_RAW, w.BOT_TOKEN)), "오류 문구에서 키 3종 가림")
+
+print("== 실제 DB: trips 조회 (excluded 컬럼이 아직 없어도 실패하지 않아야)")
+from datetime import timedelta
+rows = w.fetch_trips(1, (now - timedelta(days=w.LOOKBACK_DAYS)).isoformat())
+ok(isinstance(rows, list), f"fetch_trips 정상 ({len(rows)}행)")
 
 print("== 실제 API: 버스 정류장 후보")
 g = w.bus_stop_ids({"station_from": "노원역"})
