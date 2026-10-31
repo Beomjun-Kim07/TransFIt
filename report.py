@@ -1,5 +1,6 @@
 # report.py — 알림 수첩: notifications(보낸 알림)와 trips(실제 출발)를 맞춰 docs/notebook.md 표를 만든다.
 # GitHub Actions(report.yml)가 매일 23:50 KST에 실행하고, 바뀐 게 있을 때만 docs/notebook.md를 커밋한다.
+# 저장소가 공개라 경로는 "경로 #<id>"로만 쓴다 (경로 이름 = 출발·도착 장소라 넣지 않는다).
 # 환경변수: SUPABASE_URL, SUPABASE_SERVICE_KEY (텔레그램·실시간 키는 안 쓴다). 로컬: python3 report.py
 import os, sys
 from collections import Counter, defaultdict
@@ -57,12 +58,12 @@ def build_rows(routes, segments, notifications, trips):
         actual = min(same_day, key=lambda t: abs((w.parse_ts(t["started_at"]) - depart).total_seconds()), default=None)
         a_at = w.parse_ts(actual["started_at"]).astimezone(w.KST) if actual else None
         rows.append({
-            "route_id": r["id"], "date": n["date"], "route": r["name"], "kind": n["kind"],
+            "route_id": r["id"], "date": n["date"], "route": f"경로 #{r['id']}", "kind": n["kind"],   # 공개 저장소: 경로 이름(출발·도착 장소)은 안 쓴다
             "count": dup[(n["route_id"], n["date"], n["kind"])], "sent": sent, "depart": depart,
             "actual": a_at, "excluded": bool(actual and actual.get("excluded")),
             "diff": round((a_at - depart).total_seconds() / 60) if a_at else None,
         })
-    rows.sort(key=lambda x: (x["route"], x["route_id"], KIND_ORDER.get(x["kind"], 9), x["sent"]))
+    rows.sort(key=lambda x: (x["route_id"], KIND_ORDER.get(x["kind"], 9), x["sent"]))
     rows.sort(key=lambda x: x["date"], reverse=True)
     return rows
 
@@ -110,7 +111,7 @@ def render(rows):
     return "\n".join(out + [""])
 
 def main():
-    routes = sb_all("routes", {"select": "id,name,arrive_by,confidence,baseline_sec,fallback_min", "order": "id"})
+    routes = sb_all("routes", {"select": "id,arrive_by,confidence,baseline_sec,fallback_min", "order": "id"})   # name은 읽지도 않는다
     segments = sb_all("segments", {"select": "route_id,kind,expected_sec", "order": "route_id,seq"})
     notifications = sb_all("notifications", {"select": "route_id,date,kind,sent_at", "order": "id"})
     trips = sb_all("trips", {"select": "route_id,started_at,ended_at,excluded", "order": "id"})
