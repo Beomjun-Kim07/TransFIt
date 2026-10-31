@@ -149,6 +149,35 @@
   .fchip { flex:0 0 auto; min-height:34px; padding:0 14px; border-radius:999px; border:0; background:var(--fill); font-size:15px; color:var(--label) }
   .fchip[aria-pressed="true"] { background:var(--accent); color:#fff; font-weight:600 }
   .rec.off .grow { opacity:.4 }
+  .rowbtn svg.disc { width:14px; height:14px; stroke-width:2.6; color:var(--label3) }   /* iOS 오른쪽 > */
+  /* 기록 상세: 밀려 들어오는 화면. 탭바(20)보다 아래, 본문보다 위 */
+  .push { position:fixed; inset:0; z-index:19; background:var(--bg); overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+          transition:transform .35s cubic-bezier(.32,.72,0,1); box-shadow:-10px 0 30px rgba(0,0,0,.12) }
+  .push.enter, .push.leave { transform:translateX(100%) } .push.drag { transition:none }
+  main.wrap { transition:transform .35s cubic-bezier(.32,.72,0,1) }
+  body.pushed main.wrap { transform:translateX(-25%) } body.pushed .navbar { visibility:hidden }
+  .pnav { position:sticky; top:0; z-index:2; height:calc(44px + env(safe-area-inset-top)); padding-top:env(safe-area-inset-top);
+          display:flex; align-items:center; justify-content:center; border-bottom:.5px solid transparent; transition:background .2s, border-color .2s }
+  .pnav span { font-size:17px; font-weight:600; opacity:0; transition:opacity .2s; max-width:56%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .push.scrolled .pnav { background:var(--bar); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px); border-bottom-color:var(--sep) }
+  .push.scrolled .pnav span { opacity:1 }
+  .backbtn { position:absolute; left:max(0px, env(safe-area-inset-left)); bottom:0; height:44px; min-width:44px; display:flex; align-items:center; padding:0 10px 0 6px;
+             border:0; background:none; color:var(--accent); font-size:17px }
+  .backbtn svg { width:24px; height:24px; fill:none; stroke:currentColor; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; margin-right:1px }
+  .backbtn:active { opacity:.4 }
+  .pwrap .large { word-break:keep-all }   /* 긴 경로 이름은 단어 단위로 줄바꿈 */
+  .pwrap { max-width:600px; margin:0 auto; padding:0 max(16px, env(safe-area-inset-right)) calc(96px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)) }
+  /* 점 그래프 */
+  .chartcard { padding:12px 16px 10px }
+  .chart { display:block; width:100%; overflow:visible }
+  .chart text { fill:var(--label2); font-size:11px; font-family:inherit; font-variant-numeric:tabular-nums }
+  .chart .grid { stroke:var(--sep); stroke-width:.5 }
+  .chart .base { stroke:var(--label2); stroke-width:1.2; stroke-dasharray:4 4 }
+  .chart .dot { fill:var(--accent) } .chart .dot.off { fill:var(--card); stroke:var(--accent); stroke-width:1.5 }
+  .legend { display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:6px; font-size:12px; color:var(--label2) }
+  .legend i { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--accent); margin-right:5px; vertical-align:0 }
+  .legend i.off { background:none; border:1.5px solid var(--accent); box-sizing:border-box }
+  .legend i.base { width:16px; height:0; border-radius:0; background:none; border-top:1.5px dashed var(--label2); vertical-align:3px }
   .rtime { font-variant-numeric:tabular-nums } .rtime b { margin-left:6px }
   .tag { font-size:11px; color:var(--label2); border:.5px solid var(--sep); border-radius:5px; padding:0 5px; margin-left:6px; vertical-align:2px; white-space:nowrap }
   /* iOS 스위치 */
@@ -279,12 +308,7 @@
 
     <!-- 기록 -->
     <section id="tab-records" class="hidden">
-      <div class="card">
-        <div class="stats" id="recStats"></div>
-        <div class="filters" id="recFilter"></div>
-      </div>
-      <div class="gfoot" id="recNote" style="margin-top:-8px"></div>
-      <div id="recList"></div>
+      <div id="recRoot"></div>
     </section>
 
     <!-- 설정 -->
@@ -304,6 +328,21 @@
       <div class="gfoot" style="margin-top:24px">데이터: 서울열린데이터광장(지하철 실시간 도착) · 공공데이터포털·서울특별시(버스 정류소·도착) · 카카오(장소 검색·길찾기)</div>
     </section>
   </main>
+
+  <!-- 기록 상세: 오른쪽에서 밀려 들어오는 화면 (탭바 아래) -->
+  <div id="recPush" class="push hidden" role="region" aria-labelledby="rdTitle">
+    <header class="pnav">
+      <button class="backbtn" onclick="recBack()" aria-label="기록으로 돌아가기"><svg viewBox="0 0 24 24"><path d="M14.5 4.5 7 12l7.5 7.5"/></svg>기록</button>
+      <span id="rdNbTitle"></span>
+    </header>
+    <div class="pwrap">
+      <h1 class="large" id="rdTitle"></h1>
+      <div class="card" style="padding:14px 0"><div class="stats" id="rdStats"></div></div>
+      <div class="card chartcard"><div id="rdChart"></div><div class="legend" id="rdLegend"></div></div>
+      <div class="gfoot" id="rdNote" style="margin-top:-8px"></div>
+      <div id="rdList"></div>
+    </div>
+  </div>
 
   <nav class="tabbar" role="tablist" aria-label="화면">
     <div>
@@ -340,9 +379,10 @@ const sb = supabase.createClient(C.SUPABASE_URL, C.SUPABASE_ANON_KEY);
 const WALK_KMH = 3.7, MIN_SAMPLES = 5, OPEN_MS = 3 * 3600e3, LOOKBACK_MS = 60 * 86400e3;   // watch.py와 같은 기준 (최근 60일)
 const DAY_KO = "월화수목금토일", DAY_EN = "MTWTFSS";   // active_days: 월=0 … 일=6, '-'는 쉬는 날
 const TABS = ["home", "find", "records", "settings"], TITLES = { home:"TransFit", find:"길찾기", records:"기록", settings:"설정" };
-let user = null, shownFor, tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "home";
+const HASH_TAB = location.hash.slice(1).split("/")[0];   // #records/12 같은 상세 주소로 새로 열면 첫 화면부터
+let user = null, shownFor, tab = TABS.includes(HASH_TAB) ? HASH_TAB : "home";
 let routes = [], segsBy = {}, tripsAll = [], tgLinked = null, apiToken, reissuing = false;   // apiToken: undefined = 아직 못 읽음, null = 없음
-let busyId = null, skipTo = {}, newDays = [1,1,1,1,1,0,0], found = null, recFilter = "all", lastSync = 0;
+let busyId = null, skipTo = {}, newDays = [1,1,1,1,1,0,0], found = null, lastSync = 0;
 const openDetails = new Set();
 const $ = id => document.getElementById(id);
 const pad = n => String(n).padStart(2, "0");
@@ -457,7 +497,7 @@ async function render() {
   document.body.classList.toggle("authed", !!user);   // 설치 안내를 탭바 위로 올린다
   $("auth").classList.toggle("hidden", !!user);
   $("app").classList.toggle("hidden", !user);
-  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; closeMenu(); return; }
+  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; closeMenu(); closeRec(false); return; }
   showTab(); lastSync = Date.now();
   await Promise.all([loadTelegram(), loadAll()]);
 }
@@ -468,6 +508,8 @@ function showTab() {
   $("eyebrow").textContent = tab === "home" ? `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAY_KO[todayIdx()]}요일` : "";
 }
 function setTab(t) {
+  if (t === "records" && tab === "records" && recView !== null) return recBack();   // 기록 탭을 다시 누르면 첫 화면으로
+  closeRec(false);
   tab = t; showTab(); window.scrollTo(0, 0); onScroll();
   try { history.replaceState(null, "", "#" + t); } catch {}
 }
@@ -938,21 +980,49 @@ async function delSegment(id) {
 }
 
 // ---------- 기록 ----------
+// 첫 화면 = 경로 리스트(전체 기록 + 경로별), 셀을 누르면 상세가 오른쪽에서 밀려 들어온다 (history.pushState → 뒤로가기·스와이프)
 const REC_STEPS = [["platform_at","승강장"], ["boarded_at","탑승"], ["transfer_off_at","환승 하차"], ["transfer_on_at","환승 탑승"]];
-function setRecFilter(v) { recFilter = v === "all" ? "all" : Number(v); renderRecords(); }
+const REC_NOTE = "최근 60일 · 제외한 기록과 3분 미만·3시간 초과는 빼고 계산해요.";
+const DISC = `<svg class="disc" viewBox="0 0 24 24"><path d="m9 4.5 7.5 7.5L9 19.5"/></svg>`;
+let recView = null, recAnimBack = false, pushT;   // recView: null = 첫 화면, "all" = 전체 기록, 숫자 = 경로 id
+const recTrips = v => v === "all" ? tripsAll : tripsAll.filter(t => t.route_id === v);
+const recConf = v => v === "all" ? 90 : routeById(v)?.confidence ?? 90;
+const recName = v => v === "all" ? "전체 기록" : routeById(v)?.name || "경로";
+function recSummary(list, conf) {
+  const durs = list.filter(usable).map(tripSec), n = durs.length;
+  return { n, total: list.length, avg: n ? durs.reduce((a, b) => a + b, 0) / n : null, q: quantile(durs, conf / 100) };
+}
+function recSub(list, conf) {
+  const s = recSummary(list, conf);
+  if (!s.n) return s.total ? `기록 ${s.total}회 · 계산에 쓸 기록 없음` : "아직 기록 없음";
+  return `기록 ${s.n}회 · 평균 ${Math.round(s.avg / 60)}분 · ${conf}% ${Math.round(s.q / 60)}분`;
+}
 function renderRecords() {
-  if (recFilter !== "all" && !routeById(recFilter)) recFilter = "all";
-  const list = tripsAll.filter(t => recFilter === "all" || t.route_id === recFilter);
-  const durs = list.filter(usable).map(tripSec);
-  const conf = recFilter === "all" ? 90 : routeById(recFilter).confidence;
-  const m = v => v == null ? "—" : Math.round(v / 60);
-  $("recStats").innerHTML = `<div><span>평균</span><b>${m(durs.length ? durs.reduce((a, b) => a + b, 0) / durs.length : null)}</b><i>분</i></div>
-    <div><span>${conf}% 값</span><b>${m(quantile(durs, conf / 100))}</b><i>분</i></div>
-    <div><span>횟수</span><b>${durs.length}</b><i>회</i></div>`;
-  $("recNote").textContent = `최근 60일 · 제외한 기록과 3분 미만·3시간 초과는 빼고 계산해요.${recFilter === "all" && routes.length > 1 ? " 경로를 골라 보면 더 정확해요." : ""}`;
-  $("recFilter").innerHTML = routes.length > 1 ? [["all", "전체"], ...routes.map(r => [r.id, r.name])].map(([v, n]) =>
-    `<button class="fchip" aria-pressed="${recFilter === v}" onclick="setRecFilter('${v}')">${esc(n)}</button>`).join("") : "";
-  $("recFilter").classList.toggle("hidden", routes.length < 2);
+  const cell = v => `<button class="cell rowbtn" onclick="openRec('${v}')">
+      <div class="grow"><b>${esc(recName(v))}</b><div class="cap">${recSub(recTrips(v), recConf(v))}</div></div>${DISC}</button>`;
+  $("recRoot").innerHTML = !routes.length && !tripsAll.length
+    ? `<div class="card empty"><b>아직 기록이 없어요</b><div class="sub">홈에서 <b style="display:inline;font-size:inherit">출발했어요</b>를 눌러 시작해요.</div></div>`
+    : `<div class="group">${cell("all")}</div>
+       ${routes.length ? `<div class="ghead">경로</div><div class="group">${routes.map(r => cell(r.id)).join("")}</div>` : ""}
+       <div class="gfoot">${REC_NOTE}</div>`;
+  if (recView !== null) {
+    if (recView !== "all" && !routeById(recView)) { closeRec(false); try { history.replaceState(null, "", "#records"); } catch {} }
+    else renderRecDetail();
+  }
+}
+function renderRecDetail() {
+  const v = recView, list = recTrips(v), conf = recConf(v), s = recSummary(list, conf);
+  const m = x => x == null ? "—" : Math.round(x / 60);
+  $("rdTitle").textContent = $("rdNbTitle").textContent = recName(v);
+  $("rdStats").innerHTML = `<div><span>평균</span><b>${m(s.avg)}</b><i>분</i></div>
+    <div><span>${conf}% 값</span><b>${m(s.q)}</b><i>분</i></div>
+    <div><span>횟수</span><b>${s.n}</b><i>회</i></div>`;
+  const base = v === "all" ? (routes.length === 1 ? routes[0].baseline_sec : null) : routeById(v)?.baseline_sec;
+  const w = Math.max(240, ($("rdChart").clientWidth || 343));
+  $("rdChart").innerHTML = chartSvg(list, base, w);
+  $("rdLegend").innerHTML = $("rdChart").querySelector("svg")
+    ? `<span><i></i>계산에 쓴 기록</span><span><i class="off"></i>제외</span>${base ? `<span><i class="base"></i>카카오 예상 ${Math.round(base / 60)}분</span>` : ""}` : "";
+  $("rdNote").textContent = REC_NOTE;
   let html = "", day = "";
   for (const t of list) {
     const d = new Date(t.started_at), label = `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAY_KO[(d.getDay() + 6) % 7]}요일`;
@@ -963,14 +1033,106 @@ function renderRecords() {
     let prev = t.started_at;
     const steps = REC_STEPS.filter(([f]) => t[f]).map(([f, n]) => { const g = mins(prev, t[f]); prev = t[f]; return `${n} ${hhmm(new Date(t[f]))} +${g}`; }).join(" · ");
     html += `<div class="cell rec${t.excluded ? " off" : ""}">
-      <div class="grow"><div class="cap">${esc(routeById(t.route_id)?.name || "경로 없음")}</div>
+      <div class="grow">${v === "all" ? `<div class="cap">${esc(routeById(t.route_id)?.name || "경로 없음")}</div>` : ""}
         <div class="rtime">${hhmm(d)} → ${end ? hhmm(end) : "—"}<b>${total}</b>${tag}</div>
         ${steps ? `<div class="cap">${steps}</div>` : ""}</div>
       <button class="sw" role="switch" aria-checked="${!!t.excluded}" aria-label="이 기록 계산에서 제외" onclick="toggleExclude(${t.id})"><span class="track"></span>제외</button>
     </div>`;
   }
-  $("recList").innerHTML = html ? html + "</div>" : `<div class="card empty" style="margin-top:16px"><b>아직 기록이 없어요</b><div class="sub">홈에서 <b style="display:inline;font-size:inherit">출발했어요</b>를 눌러 시작해요.</div></div>`;
+  $("rdList").innerHTML = html ? html + "</div>" : `<div class="card empty" style="margin-top:16px"><b>아직 기록이 없어요</b><div class="sub">홈에서 <b style="display:inline;font-size:inherit">출발했어요</b>를 눌러 시작해요.</div></div>`;
 }
+// 점 그래프: 가로 = 날짜, 세로 = 소요 분. 제외 기록은 빈 점, 카카오 예상(baseline)은 점선 가로줄. 최근 60일·3분~3시간만
+function chartSvg(list, baseSec, W) {
+  const pts = list.filter(t => t.ended_at && inRange(t) && Date.now() - new Date(t.started_at) <= LOOKBACK_MS)
+    .map(t => ({ x: +new Date(t.started_at), y: tripSec(t) / 60, off: !!t.excluded }));
+  if (!pts.length) return `<div class="cap" style="text-align:center;padding:28px 0">목적지 도착까지 기록하면 여기에 점으로 보여요</div>`;
+  const base = baseSec ? baseSec / 60 : null, ys = pts.map(p => p.y).concat(base ?? []);
+  let y0 = Math.max(0, Math.floor((Math.min(...ys) - 2) / 5) * 5), y1 = Math.ceil((Math.max(...ys) + 2) / 5) * 5;
+  if (y1 - y0 < 10) y1 = y0 + 10;
+  if ((y1 - y0) % 10) y1 += 5;   // 가운데 눈금도 5분 단위
+  const xs = pts.map(p => p.x), DAY = 864e5;
+  let x0 = Math.min(...xs) - DAY / 2, x1 = Math.max(...xs) + DAY / 2;
+  if (x1 - x0 < 7 * DAY) { const c = (x0 + x1) / 2; x0 = c - 3.5 * DAY; x1 = c + 3.5 * DAY; }
+  const H = 156, L = 28, R = 8, T = 8, B = 22;
+  const X = x => L + (x - x0) / (x1 - x0) * (W - L - R), Y = y => T + (1 - (y - y0) / (y1 - y0)) * (H - T - B);
+  const md = x => { const d = new Date(x); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  const f = n => n.toFixed(1);
+  let g = "";
+  for (const v of [y0, (y0 + y1) / 2, y1]) g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${f(Y(v))}" y2="${f(Y(v))}"/><text x="${L - 6}" y="${f(Y(v) + 4)}" text-anchor="end">${Math.round(v)}</text>`;
+  g += `<text x="${L}" y="${H - 4}">${md(x0 + DAY / 2)}</text><text x="${W - R}" y="${H - 4}" text-anchor="end">${md(x1 - DAY / 2)}</text>`;
+  if (base) g += `<line class="base" x1="${L}" x2="${W - R}" y1="${f(Y(base))}" y2="${f(Y(base))}"/>`;
+  g += pts.sort((a, b) => a.off - b.off).map(p => `<circle class="dot${p.off ? " off" : ""}" cx="${f(X(p.x))}" cy="${f(Y(p.y))}" r="4.5"><title>${md(p.x)} ${Math.round(p.y)}분${p.off ? " (제외)" : ""}</title></circle>`).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="날짜별 소요 시간 점 그래프 (분)">${g}</svg>`;
+}
+// 화면 이동: 셀 → pushState, "< 기록"·탭 다시 누름 → history.back(), 브라우저 뒤로가기·스와이프 → popstate
+const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+function openRec(v) {
+  v = v === "all" ? "all" : Number(v);
+  if (v !== "all" && !routeById(v)) return;
+  recView = v; showPush(true, true); renderRecDetail();
+  try { history.pushState({ rec: String(v) }, "", `#records/${v}`); } catch {}
+}
+function recBack() {
+  if (history.state?.rec) { recAnimBack = true; history.back(); }   // popstate가 닫는다
+  else { closeRec(true); try { history.replaceState(null, "", "#records"); } catch {} }
+}
+function closeRec(anim) { if (recView === null) return; recView = null; showPush(false, anim); }
+function showPush(on, anim) {
+  const p = $("recPush"); clearTimeout(pushT);
+  anim = anim && !reduceMotion();
+  if (on) {
+    p.classList.remove("leave", "drag"); p.style.transform = "";
+    if (anim) p.classList.add("enter");
+    p.classList.remove("hidden"); p.scrollTop = 0; p.classList.remove("scrolled");
+    if (anim) { void p.offsetWidth; p.classList.remove("enter"); }
+    document.body.classList.add("pushed");
+  } else {
+    document.body.classList.remove("pushed");
+    const done = () => { p.classList.add("hidden"); p.classList.remove("leave", "drag"); p.style.transform = ""; };
+    if (anim) { p.classList.remove("drag"); p.classList.add("leave"); pushT = setTimeout(done, 360); } else done();
+  }
+}
+addEventListener("popstate", () => {
+  const [t, sub] = location.hash.slice(1).split("/");
+  if (user && t === "records" && sub) {   // 앞으로 가기
+    const v = sub === "all" ? "all" : Number(sub);
+    if (recView !== v && (v === "all" || routeById(v))) { recView = v; showPush(true, true); renderRecDetail(); }
+  } else closeRec(recAnimBack || !isIOS || isStandalone());   // iOS 사파리 스와이프는 브라우저가 이미 밀어 줬다
+  recAnimBack = false;
+  if (user && TABS.includes(t) && t !== tab) { tab = t; showTab(); onScroll(); }
+});
+$("recPush").addEventListener("scroll", e => e.currentTarget.classList.toggle("scrolled", e.currentTarget.scrollTop > 34), { passive: true });
+let rdResizeT;
+addEventListener("resize", () => { clearTimeout(rdResizeT); rdResizeT = setTimeout(() => { if (recView !== null) renderRecDetail(); }, 150); });
+// 홈 화면 앱(standalone)에선 iOS가 뒤로 스와이프를 안 주므로 왼쪽 가장자리 스와이프를 직접 받는다
+(function () {
+  const p = $("recPush"), wrap = document.querySelector("main.wrap");
+  let x0 = null, y0 = 0, t0 = 0, dx = 0, horiz = null;
+  p.addEventListener("touchstart", e => {
+    x0 = null;
+    if (!isStandalone() || recView === null || e.touches.length !== 1 || e.touches[0].clientX > 24) return;
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; t0 = Date.now(); dx = 0; horiz = null;
+  }, { passive: true });
+  p.addEventListener("touchmove", e => {
+    if (x0 === null) return;
+    const t = e.touches[0], ddx = t.clientX - x0, ddy = t.clientY - y0;
+    if (horiz === null && Math.abs(ddx) + Math.abs(ddy) > 8) horiz = Math.abs(ddx) > Math.abs(ddy);
+    if (horiz === false) { x0 = null; return; }
+    if (!horiz) return;
+    e.preventDefault();
+    dx = Math.max(0, ddx);
+    p.classList.add("drag"); p.style.transform = `translateX(${dx}px)`;
+    wrap.style.transition = "none"; wrap.style.transform = `translateX(${-25 * (1 - dx / p.clientWidth)}%)`;
+  }, { passive: false });
+  const end = () => {
+    if (x0 === null) return;
+    x0 = null; p.classList.remove("drag"); wrap.style.transition = wrap.style.transform = "";
+    if (!horiz) return;
+    if (dx > p.clientWidth / 3 || (dx > 30 && dx / (Date.now() - t0) > .5)) { p.style.transform = "translateX(100%)"; recBack(); }
+    else p.style.transform = "";
+  };
+  p.addEventListener("touchend", end); p.addEventListener("touchcancel", end);
+})();
 // 지연·우회한 날은 제외 → 출발 시각 계산(웹·watch.py)에서 빠진다
 async function toggleExclude(id) {
   const t = tripsAll.find(x => x.id === id); if (!t) return;
@@ -1124,6 +1286,7 @@ addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = 
 addEventListener("appinstalled", () => { installEvt = null; hideInstall(); toast("홈 화면에 설치했어요"); });
 if (isIOSSafari) showInstall("ios");
 
+if (location.hash.includes("/")) try { history.replaceState(null, "", "#" + tab); } catch {}
 renderDays(); showTab();
 </script>
 </body>
