@@ -221,3 +221,5 @@ __marimo__/
 
 # 키와 토큰 (깃허브에 올리지 않음)
 .env.local
+
+.DS_Store

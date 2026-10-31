@@ -1,0 +1,1458 @@
+openapi: 3.0.0
+info:
+  title: /Users/beju_mac/Downloads/map.har Mitmproxy2Swagger
+  version: 1.0.0
+servers:
+- url: https://map.naver.com/p/api
+  description: The default server
+paths:
+  /search/all:
+    get:
+      summary: GET all
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      metaInfo:
+                        type: object
+                        properties:
+                          pageId:
+                            type: string
+                          sessionId:
+                            type: string
+                          rcode:
+                            type: string
+                          searchedQuery:
+                            type: string
+                          queryTypes:
+                            type: array
+                            items:
+                              type: string
+                          regionQuery:
+                            type: boolean
+                          busQuery:
+                            type: boolean
+                          displayCorrectAnswer:
+                            type: boolean
+                      place:
+                        type: object
+                        properties:
+                          page:
+                            type: number
+                          totalCount:
+                            type: number
+                          boundary:
+                            type: array
+                            items:
+                              type: string
+                          feedback:
+                            type: array
+                            items:
+                              type: string
+                          options:
+                            type: object
+                            properties:
+                              sort:
+                                type: string
+                              toggleLocation:
+                                type: string
+                              rank:
+                                type: string
+                          filters:
+                            type: object
+                            properties:
+                              petrol:
+                                type: object
+                                properties:
+                                  type:
+                                    type: string
+                                  typeList:
+                                    type: array
+                                    items:
+                                      type: object
+                                      properties:
+                                        code:
+                                          type: string
+                                        sasSiteGkindCode:
+                                          type: string
+                                        name:
+                                          type: string
+                              petrolCompany:
+                                type: object
+                                properties:
+                                  company:
+                                    type: string
+                                  companyList:
+                                    type: array
+                                    items:
+                                      type: object
+                                      properties:
+                                        code:
+                                          type: string
+                                        name:
+                                          type: string
+                              hasFilter:
+                                type: boolean
+                          reSearch:
+                            type: object
+                          isSiteSortAvailable:
+                            type: boolean
+                          hasPollingPlace:
+                            type: boolean
+                          isAdultKeyword:
+                            type: boolean
+                          containAdultContents:
+                            type: boolean
+                          brandPromotion:
+                            type: object
+                          list:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                index:
+                                  type: string
+                                rank:
+                                  type: string
+                                id:
+                                  type: string
+                                name:
+                                  type: string
+                                tel:
+                                  type: string
+                                isCallLink:
+                                  type: boolean
+                                virtualTel:
+                                  type: string
+                                virtualTelDisplay:
+                                  type: string
+                                ppc:
+                                  type: string
+                                category:
+                                  type: array
+                                  items:
+                                    type: string
+                                categoryPath:
+                                  type: array
+                                  items:
+                                    type: array
+                                    items:
+                                      type: string
+                                rcode:
+                                  type: string
+                                businessStatus:
+                                  type: object
+                                  properties:
+                                    requestTime:
+                                      type: string
+                                    status:
+                                      type: object
+                                      properties:
+                                        code:
+                                          type: number
+                                        text:
+                                          type: string
+                                        emphasis:
+                                          type: boolean
+                                        description:
+                                          type: string
+                                        detailInfo:
+                                          type: string
+                                address:
+                                  type: string
+                                roadAddress:
+                                  type: string
+                                abbrAddress:
+                                  type: string
+                                shortAddress:
+                                  type: array
+                                  items:
+                                    type: string
+                                display:
+                                  type: string
+                                telDisplay:
+                                  type: string
+                                context:
+                                  type: array
+                                  items: {}
+                                reviewCount:
+                                  type: number
+                                placeReviewCount:
+                                  type: number
+                                ktCallMd:
+                                  type: string
+                                coupon:
+                                  type: string
+                                thumUrl:
+                                  type: object
+                                thumUrls:
+                                  type: array
+                                  items: {}
+                                type:
+                                  type: string
+                                isSite:
+                                  type: string
+                                posExact:
+                                  type: string
+                                x:
+                                  type: string
+                                y:
+                                  type: string
+                                itemLevel:
+                                  type: string
+                                isAdultBusiness:
+                                  type: boolean
+                                streetPanorama:
+                                  type: object
+                                  properties:
+                                    id:
+                                      type: string
+                                    pan:
+                                      type: string
+                                    tilt:
+                                      type: string
+                                    lng:
+                                      type: string
+                                    lat:
+                                      type: string
+                                    fov:
+                                      type: string
+                                skyPanorama:
+                                  type: object
+                                  properties:
+                                    id:
+                                      type: string
+                                    pan:
+                                      type: string
+                                    tilt:
+                                      type: string
+                                    lng:
+                                      type: string
+                                    lat:
+                                      type: string
+                                    fov:
+                                      type: string
+                                insidePanorama:
+                                  type: object
+                                interiorPanorama:
+                                  type: object
+                                indoorPanorama:
+                                  type: object
+                                theme:
+                                  type: object
+                                  properties:
+                                    isSubway:
+                                      type: string
+                                    themeId:
+                                      type: string
+                                    targetUrl:
+                                      type: string
+                                poiInfo:
+                                  type: object
+                                  properties:
+                                    relation:
+                                      type: object
+                                      properties:
+                                        poiShapeType:
+                                          type: string
+                                        shapeKey:
+                                          type: object
+                                          properties:
+                                            typeName:
+                                              type: string
+                                            wsid:
+                                              type: string
+                                            shapeID:
+                                              type: string
+                                        boundary:
+                                          type: object
+                                          properties:
+                                            minX:
+                                              type: string
+                                            minY:
+                                              type: string
+                                            maxX:
+                                              type: string
+                                            maxY:
+                                              type: string
+                                        detail:
+                                          type: array
+                                          items:
+                                            type: object
+                                            properties:
+                                              sid:
+                                                type: string
+                                              fullName:
+                                                type: string
+                                              name:
+                                                type: string
+                                              category:
+                                                type: string
+                                              xPos:
+                                                type: string
+                                              yPos:
+                                                type: string
+                                              bZorder:
+                                                type: string
+                                              type:
+                                                type: string
+                                    hasRelation:
+                                      type: boolean
+                                    hasRoad:
+                                      type: boolean
+                                    hasLand:
+                                      type: boolean
+                                    hasPolygon:
+                                      type: boolean
+                                homePage:
+                                  type: string
+                                description:
+                                  type: string
+                                entranceCoords:
+                                  type: object
+                                  properties: {}
+                                bizhourInfo:
+                                  type: string
+                                menuInfo:
+                                  type: object
+                                couponUrlMobile:
+                                  type: string
+                                hasCardBenefit:
+                                  type: boolean
+                                menuExist:
+                                  type: string
+                                hasNaverBooking:
+                                  type: boolean
+                                hasNaverSmartOrder:
+                                  type: boolean
+                                reservationLabel:
+                                  type: object
+                                  properties:
+                                    standard:
+                                      type: boolean
+                                    preOrder:
+                                      type: boolean
+                                    table:
+                                      type: boolean
+                                    takeout:
+                                      type: boolean
+                                reservation:
+                                  type: object
+                                  properties:
+                                    benefit:
+                                      type: string
+                                hasBroadcastInfo:
+                                  type: boolean
+                                hasNPay:
+                                  type: boolean
+                                carWash:
+                                  type: string
+                                parkingPrice:
+                                  type: string
+                                parkingAvailable:
+                                  type: boolean
+                                card:
+                                  type: string
+                                distance:
+                                  type: string
+                                marker:
+                                  type: string
+                                markerSelected:
+                                  type: string
+                                markerId:
+                                  type: string
+                                microReview:
+                                  type: array
+                                  items: {}
+                                michelinGuide:
+                                  type: object
+                                indoor:
+                                  type: object
+                                  properties:
+                                    zoneId:
+                                      type: string
+                                    zOrder:
+                                      type: string
+                                    isRepresentativeBuilding:
+                                      type: boolean
+                                subway:
+                                  type: object
+                                  properties:
+                                    id:
+                                      type: string
+                                    lane:
+                                      type: string
+                      bus:
+                        type: object
+                        properties:
+                          subType:
+                            type: string
+                          feedback:
+                            type: array
+                            items:
+                              type: string
+                          options:
+                            type: object
+                            properties:
+                              rank:
+                                type: string
+                          links:
+                            type: object
+                            properties:
+                              others:
+                                type: object
+                              queryForDupRegion:
+                                type: object
+                          busRoute:
+                            type: object
+                            properties:
+                              page:
+                                type: number
+                              totalCount:
+                                type: number
+                              boundary:
+                                type: object
+                              filters:
+                                type: object
+                                properties:
+                                  busRouteTypeCodeList:
+                                    type: array
+                                    items:
+                                      type: object
+                                      properties:
+                                        typeName:
+                                          type: string
+                                        typeCode:
+                                          type: string
+                                  doCodeList:
+                                    type: array
+                                    items:
+                                      type: object
+                                      properties:
+                                        doCode:
+                                          type: string
+                                        doName:
+                                          type: string
+                                        doNameAlias:
+                                          type: string
+                              list:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    index:
+                                      type: number
+                                    rank:
+                                      type: number
+                                    id:
+                                      type: string
+                                    name:
+                                      type: string
+                                    aliasName:
+                                      type: string
+                                    displayName:
+                                      type: string
+                                    cityCode:
+                                      type: string
+                                    cityName:
+                                      type: string
+                                    type:
+                                      type: number
+                                    typeName:
+                                      type: string
+                                    typeIconName:
+                                      type: string
+                                    startPoint:
+                                      type: string
+                                    endPoint:
+                                      type: string
+                                    turningPointIdx:
+                                      type: string
+                                    firstTime:
+                                      type: string
+                                    lastTime:
+                                      type: string
+                                    intervalTime:
+                                      type: string
+                                    intervalCount:
+                                      type: string
+                                    liveUpdate:
+                                      type: boolean
+                                    useInterval:
+                                      type: boolean
+                                    mainStation:
+                                      type: string
+                          busStation:
+                            type: object
+                            properties:
+                              page:
+                                type: number
+                              totalCount:
+                                type: number
+                              filters:
+                                type: object
+                                properties:
+                                  doCodeList:
+                                    type: array
+                                    items:
+                                      type: object
+                                      properties:
+                                        doCode:
+                                          type: string
+                                        doName:
+                                          type: string
+                                        doNameAlias:
+                                          type: string
+                              boundary:
+                                type: object
+                              list:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    index:
+                                      type: number
+                                    rank:
+                                      type: number
+                                    id:
+                                      type: string
+                                    name:
+                                      type: string
+                                    stationClass:
+                                      type: string
+                                    x:
+                                      type: string
+                                    y:
+                                      type: string
+                                    address:
+                                      type: string
+                                    streetPanorama:
+                                      type: object
+                                      properties:
+                                        id:
+                                          type: string
+                                        pan:
+                                          type: number
+                                        tilt:
+                                          type: number
+                                        lng:
+                                          type: number
+                                        lat:
+                                          type: number
+                                        fov:
+                                          type: number
+                                    itemLevel:
+                                      type: string
+                                    arsId:
+                                      type: string
+                                    arsIds:
+                                      type: array
+                                      items:
+                                        type: string
+                                    doCode:
+                                      type: string
+                                    doName:
+                                      type: string
+                                    liveUpdate:
+                                      type: boolean
+                                    routeList:
+                                      type: array
+                                      items:
+                                        type: object
+                                        properties:
+                                          id:
+                                            type: string
+                                          name:
+                                            type: string
+                                          aliasName:
+                                            type: string
+                                          displayName:
+                                            type: string
+                                          type:
+                                            type: number
+                                          typeName:
+                                            type: string
+                                          typeIconName:
+                                            type: string
+                                          nextStation:
+                                            type: object
+                                            properties:
+                                              id:
+                                                type: string
+                                              name:
+                                                type: string
+                                              matchStations:
+                                                type: object
+                                                properties:
+                                                  matchStation:
+                                                    type: array
+                                                    items:
+                                                      type: object
+                                                      properties:
+                                                        id:
+                                                          type: string
+                                                        localId:
+                                                          type: string
+                                                        localDisplayId:
+                                                          type: string
+                                                        localCityCode:
+                                                          type: string
+                                    distance:
+                                      type: number
+                                    direction:
+                                      type: string
+                                    aux:
+                                      type: object
+                                      properties:
+                                        centerStop:
+                                          type: boolean
+                                        dockStop:
+                                          type: boolean
+                          hasResult:
+                            type: boolean
+                          hasRouteResult:
+                            type: boolean
+                          hasStopResult:
+                            type: boolean
+                      emptyResult:
+                        type: boolean
+                      isPlaceEmpty:
+                        type: boolean
+                      isAddressEmpty:
+                        type: boolean
+                      isBusEmpty:
+                        type: boolean
+      parameters:
+      - name: type
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: query
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: number
+      - name: searchCoord
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: sscode
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: token
+        in: query
+        required: false
+        schema:
+          type: string
+  /location/geocode:
+    get:
+      summary: GET geocode
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: object
+                    properties:
+                      code:
+                        type: number
+                      name:
+                        type: string
+                      message:
+                        type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        code:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            type:
+                              type: string
+                            mappingId:
+                              type: string
+                        region:
+                          type: object
+                          properties:
+                            area0:
+                              type: object
+                              properties:
+                                name:
+                                  type: string
+                                coords:
+                                  type: object
+                                  properties:
+                                    center:
+                                      type: object
+                                      properties:
+                                        crs:
+                                          type: string
+                                        x:
+                                          type: number
+                                        y:
+                                          type: number
+                            area1:
+                              type: object
+                              properties:
+                                name:
+                                  type: string
+                                coords:
+                                  type: object
+                                  properties:
+                                    center:
+                                      type: object
+                                      properties:
+                                        crs:
+                                          type: string
+                                        x:
+                                          type: number
+                                        y:
+                                          type: number
+                                alias:
+                                  type: string
+                            area2:
+                              type: object
+                              properties:
+                                name:
+                                  type: string
+                                coords:
+                                  type: object
+                                  properties:
+                                    center:
+                                      type: object
+                                      properties:
+                                        crs:
+                                          type: string
+                                        x:
+                                          type: number
+                                        y:
+                                          type: number
+                            area3:
+                              type: object
+                              properties:
+                                name:
+                                  type: string
+                                coords:
+                                  type: object
+                                  properties:
+                                    center:
+                                      type: object
+                                      properties:
+                                        crs:
+                                          type: string
+                                        x:
+                                          type: number
+                                        y:
+                                          type: number
+                            area4:
+                              type: object
+                              properties:
+                                name:
+                                  type: string
+                                coords:
+                                  type: object
+                                  properties:
+                                    center:
+                                      type: object
+                                      properties:
+                                        crs:
+                                          type: string
+                                        x:
+                                          type: number
+                                        y:
+                                          type: number
+                        land:
+                          type: object
+                          properties:
+                            type:
+                              type: string
+                            number1:
+                              type: string
+                            number2:
+                              type: string
+                            addition0:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                value:
+                                  type: string
+                            addition1:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                value:
+                                  type: string
+                            addition2:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                value:
+                                  type: string
+                            addition3:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                value:
+                                  type: string
+                            addition4:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                value:
+                                  type: string
+                            coords:
+                              type: object
+                              properties:
+                                center:
+                                  type: object
+                                  properties:
+                                    crs:
+                                      type: string
+                                    x:
+                                      type: number
+                                    y:
+                                      type: number
+      parameters:
+      - name: coords
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: orders
+        in: query
+        required: false
+        schema:
+          type: string
+  /place/directionsPOI/{id}:
+    get:
+      summary: GET directionspoi by id
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      placeDetail:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          address:
+                            type: object
+                            properties:
+                              roadAddress:
+                                type: string
+                              address:
+                                type: string
+                          coordinate:
+                            type: object
+                            properties:
+                              longitude:
+                                type: number
+                              latitude:
+                                type: number
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+  /directions/transit:
+    get:
+      summary: GET transit
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: object
+                  context:
+                    type: object
+                    properties:
+                      engineVersion:
+                        type: string
+                      engineUrl:
+                        type: object
+                      start:
+                        type: string
+                      goal:
+                        type: string
+                      departureTime:
+                        type: string
+                      currentDateTime:
+                        type: string
+                      recommendDirectionsType:
+                        type: string
+                      uuid:
+                        type: object
+                      idNo:
+                        type: object
+                      currentDateTimeZ:
+                        type: string
+                      departureTimeZ:
+                        type: string
+                  paths:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        idx:
+                          type: number
+                        pathLabels:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              labelCode:
+                                type: string
+                              labelText:
+                                type: string
+                        mode:
+                          type: string
+                        type:
+                          type: string
+                        transportTypes:
+                          type: array
+                          items:
+                            type: string
+                        departureTime:
+                          type: string
+                        arrivalTime:
+                          type: string
+                        transferCount:
+                          type: number
+                        duration:
+                          type: number
+                        intercityDuration:
+                          type: number
+                        walkingDuration:
+                          type: number
+                        waitingDuration:
+                          type: number
+                        shutdown:
+                          type: boolean
+                        fareGroups:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              legStepIndices:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    legIdx:
+                                      type: number
+                                    stepIdx:
+                                      type: number
+                              fareOptions:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    fareRoutes:
+                                      type: array
+                                      items:
+                                        type: object
+                                        properties:
+                                          legIdx:
+                                            type: number
+                                          stepIdx:
+                                            type: number
+                                          routeId:
+                                            type: number
+                                    fare:
+                                      type: number
+                                    currencyCode:
+                                      type: string
+                                    nanos:
+                                      type: object
+                        legs:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              steps:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    type:
+                                      type: string
+                                    departureTime:
+                                      type: string
+                                    arrivalTime:
+                                      type: string
+                                    distance:
+                                      type: number
+                                    duration:
+                                      type: number
+                                    shutdown:
+                                      type: boolean
+                                    routes:
+                                      type: array
+                                      items: {}
+                                    extRoutes:
+                                      type: array
+                                      items: {}
+                                    stops:
+                                      type: array
+                                      items: {}
+                                    points:
+                                      type: array
+                                      items:
+                                        type: object
+                                        properties:
+                                          x:
+                                            type: number
+                                          y:
+                                            type: number
+                                    walkStepOption:
+                                      type: object
+                                      properties:
+                                        stopId:
+                                          type: number
+                                        exit:
+                                          type: object
+                                          properties:
+                                            guideTemplate:
+                                              type: string
+                                            name:
+                                              type: string
+                                            typeCode:
+                                              type: string
+                                        accessibility:
+                                          type: object
+                                    walkPath:
+                                      type: object
+                                      properties:
+                                        summary:
+                                          type: object
+                                          properties:
+                                            bbox:
+                                              type: array
+                                              items:
+                                                type: object
+                                                properties:
+                                                  lat:
+                                                    type: number
+                                                  lng:
+                                                    type: number
+                                            options:
+                                              type: array
+                                              items:
+                                                type: string
+                                            facility:
+                                              type: object
+                                              properties:
+                                                crosswalk:
+                                                  type: number
+                                                overpass:
+                                                  type: number
+                                                underpass:
+                                                  type: number
+                                                stair:
+                                                  type: number
+                                                elevator:
+                                                  type: number
+                                                escalator:
+                                                  type: number
+                                                steppingstone:
+                                                  type: number
+                                                movingwalk:
+                                                  type: number
+                                                restrictedgate:
+                                                  type: number
+                                                tunnel:
+                                                  type: number
+                                            duration:
+                                              type: number
+                                            distance:
+                                              type: number
+                                            start:
+                                              type: object
+                                              properties:
+                                                lng:
+                                                  type: number
+                                                lat:
+                                                  type: number
+                                                multiEntrance:
+                                                  type: boolean
+                                                eye:
+                                                  type: object
+                                                  properties:
+                                                    lat:
+                                                      type: number
+                                                    lng:
+                                                      type: number
+                                                lookAt:
+                                                  type: object
+                                                  properties:
+                                                    lat:
+                                                      type: number
+                                                    lng:
+                                                      type: number
+                                                name:
+                                                  type: string
+                                            goal:
+                                              type: object
+                                              properties:
+                                                lng:
+                                                  type: number
+                                                lat:
+                                                  type: number
+                                                multiEntrance:
+                                                  type: boolean
+                                                eye:
+                                                  type: object
+                                                  properties:
+                                                    lat:
+                                                      type: number
+                                                    lng:
+                                                      type: number
+                                                lookAt:
+                                                  type: object
+                                                  properties:
+                                                    lat:
+                                                      type: number
+                                                    lng:
+                                                      type: number
+                                                name:
+                                                  type: string
+                                            waypoints:
+                                              type: array
+                                              items: {}
+                                            step:
+                                              type: number
+                                            pubtransExtra:
+                                              type: object
+                                              properties:
+                                                exitType:
+                                                  type: number
+                                                exitName:
+                                                  type: string
+                                        path:
+                                          type: array
+                                          items:
+                                            type: array
+                                            items:
+                                              type: number
+                                        guides:
+                                          type: array
+                                          items:
+                                            type: object
+                                            properties:
+                                              pathPointIndex:
+                                                type: number
+                                              code:
+                                                type: number
+                                              desc:
+                                                type: string
+                                              eye:
+                                                type: object
+                                                properties:
+                                                  lat:
+                                                    type: number
+                                                  lng:
+                                                    type: number
+                                              lookAt:
+                                                type: object
+                                                properties:
+                                                  lat:
+                                                    type: number
+                                                  lng:
+                                                    type: number
+                                              duration:
+                                                type: number
+                                              distance:
+                                                type: number
+                                              complex:
+                                                type: object
+                                                properties:
+                                                  from:
+                                                    type: object
+                                                    properties: {}
+                                                  to:
+                                                    type: object
+                                                    properties:
+                                                      name:
+                                                        type: string
+                                                      exit:
+                                                        type: string
+                                        links:
+                                          type: array
+                                          items:
+                                            type: object
+                                            properties:
+                                              pointIndex:
+                                                type: number
+                                              pointCount:
+                                                type: number
+                                              mid:
+                                                type: number
+                                              attrType:
+                                                type: number
+                                        altitudes:
+                                          type: array
+                                          items:
+                                            type: number
+                                        gradients:
+                                          type: array
+                                          items:
+                                            type: object
+                                            properties:
+                                              pathPointIndex:
+                                                type: number
+                                              pointCount:
+                                                type: number
+                                              level:
+                                                type: number
+                                    walkSession:
+                                      type: object
+                                      properties:
+                                        rsid:
+                                          type: string
+                                        nridno:
+                                          type: string
+                        status:
+                          type: object
+                        message:
+                          type: object
+                        requestBookmarkPaths:
+                          type: array
+                          items: {}
+                        directionGuidance:
+                          type: object
+                          properties:
+                            support:
+                              type: boolean
+                            message:
+                              type: object
+                            developerMessage:
+                              type: object
+                  bookmarkPaths:
+                    type: array
+                    items: {}
+      parameters:
+      - name: start
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: goal
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: mode
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: departureTime
+        in: query
+        required: false
+        schema:
+          type: string
+  /pubtrans/realtime/bus/arrivals/multi:
+    get:
+      summary: GET multi
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    stopId:
+                      type: number
+                    stopDisplayName:
+                      type: string
+                    id:
+                      type: number
+                    name:
+                      type: string
+                    longName:
+                      type: string
+                    aliasName:
+                      type: object
+                    type:
+                      type: object
+                      properties:
+                        id:
+                          type: number
+                        name:
+                          type: string
+                        shortName:
+                          type: string
+                        longName:
+                          type: object
+                        iconName:
+                          type: string
+                        color:
+                          type: string
+                        darkColor:
+                          type: string
+                    direction:
+                      type: string
+                    directionStopId:
+                      type: number
+                    arrival:
+                      type: object
+                      properties:
+                        status:
+                          type: string
+                        buses:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              status:
+                                type: string
+                              operatingStatus:
+                                type: object
+                                properties:
+                                  code:
+                                    type: string
+                                  desc:
+                                    type: string
+                                  longDesc:
+                                    type: string
+                              plateNo:
+                                type: string
+                              lowFloor:
+                                type: boolean
+                              remainingTime:
+                                type: number
+                              remainingStop:
+                                type: number
+                              remainingSeat:
+                                type: object
+                              congestion:
+                                type: object
+                                properties:
+                                  code:
+                                    type: string
+                                  desc:
+                                    type: string
+                              last:
+                                type: boolean
+                        referenceTime:
+                          type: string
+                    interval:
+                      type: object
+                      properties:
+                        message:
+                          type: object
+                          properties:
+                            date:
+                              type: string
+                            intervalCount:
+                              type: string
+                    stationIdx:
+                      type: number
+                    distance:
+                      type: object
+                    walkingDistance:
+                      type: object
+                    walkingDuration:
+                      type: object
+                    pastScheduleYn:
+                      type: string
+      parameters:
+      - name: stations
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: base
+        in: query
+        required: false
+        schema:
+          type: string
+  /pubtrans/bus/routes/types:
+    get:
+      summary: GET types
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: number
+                    name:
+                      type: string
+                    shortName:
+                      type: string
+                    longName:
+                      type: string
+                    iconName:
+                      type: string
+                    color:
+                      type: string
+                    darkColor:
+                      type: string
+x-path-templates:
+# Remove the ignore: prefix to generate an endpoint with its URL
+# Lines that are closer to the top take precedence, the matching is greedy
+- ignore:/ads/brand-marker
+- ignore:/login/simple
+- ignore:/mappingData
+- ignore:/place/destinationContent/{id}
+- ignore:/place/destinationContent/11591604
+- ignore:/place/directionsPOI/11591604
+- ignore:/place/panorama/{id}
+- ignore:/place/panorama/11591604
+- ignore:/roadEvents/summary
+- ignore:/search/instant-search

@@ -1,0 +1,28 @@
+name: watch
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 10분마다 (UTC 기준이지만 간격만 쓰니 무관)
+  workflow_dispatch:         # Actions 탭에서 수동 실행
+    inputs:
+      test:
+        description: "true면 시간 조건 무시하고 바로 한 통 보냄"
+        default: "false"
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python watch.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          SUBWAY_KEY: ${{ secrets.SUBWAY_KEY }}
+          BUS_KEY: ${{ secrets.BUS_KEY }}
+          TEST: ${{ github.event.inputs.test == 'true' && '1' || '0' }}
