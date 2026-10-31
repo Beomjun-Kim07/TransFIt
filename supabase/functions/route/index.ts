@@ -1,6 +1,7 @@
 // Supabase Edge Function: route
 // 브라우저가 카카오 키를 들고 있지 않도록, 길찾기를 서버에서 대신 호출한다.
-// 입력: { from: "노원역", to: "연세대학교 정문" }
+// 입력: { from: "노원역", to: "연세대학교 정문" }                       ← 이름으로 지오코딩
+//       { fromX, fromY, toX, toY, from?, to? }                        ← 좌표(경도 x, 위도 y)를 주면 지오코딩 생략. from/to는 표시 이름
 // 출력: { from:{name,x,y}, to:{name,x,y}, routes:[{type,totalTime,totalDistance,transfers,fare,steps:[...]}] }
 // 단위: time/totalTime은 초, distance/totalDistance는 m (2026-10-31 실제 응답으로 확인).
 // 카카오 stops에는 이름만 오고 정류장 번호가 없다. BUS 구간은 path.points의 첫/끝 좌표로
@@ -76,8 +77,12 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
     if (!KAKAO) throw new Error("KAKAO_REST_KEY가 설정되지 않았어요");
-    const { from, to } = await req.json();
-    const [a, b] = await Promise.all([geocode(from), geocode(to)]);
+    const { from, to, fromX, fromY, toX, toY } = await req.json();
+    const hasXY = [fromX, fromY, toX, toY].every((v) => v !== undefined && v !== null && v !== "" && !isNaN(Number(v)));
+    const [a, b] = hasXY
+      ? [{ name: from || "출발", x: String(fromX), y: String(fromY), address: null },
+         { name: to || "도착", x: String(toX), y: String(toY), address: null }]
+      : await Promise.all([geocode(from), geocode(to)]);
     const u = `https://dapi.kakao.com/v2/routing/publictraffic?start_x=${a.x}&start_y=${a.y}&end_x=${b.x}&end_y=${b.y}` +
               `&s_name=${encodeURIComponent(a.name)}&e_name=${encodeURIComponent(b.name)}`;
     const r = await fetch(u, { headers: H });
