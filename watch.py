@@ -3,6 +3,7 @@
 # 수첩은 state.json 대신 Supabase notifications 테이블을 쓴다.
 # 환경변수: SUPABASE_URL, SUPABASE_SERVICE_KEY, BOT_TOKEN, SUBWAY_KEY, BUS_KEY
 # TEST=1 로 실행하면 시간 조건과 무관하게 오늘 계산 결과를 바로 보낸다 (수첩에는 안 적는다).
+#   실제와 같은 두 통: pre('출발했어요' 버튼, callback trip:start:<route_id>) + live(버튼 없음).
 # TEST_SEGMENTS=구간.json 을 같이 주면 DB 구간 대신 그 파일의 구간으로 실시간 줄을 만든다 (시험용, DB는 안 건드림).
 # TEST일 때 텔레그램 미연결 사용자는 CHAT_ID(개발자 채팅, .env.local)로 대신 보낸다.
 
@@ -90,10 +91,27 @@ def fetch_trips(route_id, since):
         raise
 
 # ---------- 텔레그램 ----------
-def send(chat_id, text):
-    r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                      data={"chat_id": chat_id, "text": text}, timeout=10)
+def send(chat_id, text, buttons=None):
+    """buttons: inline_keyboard 줄 목록 [[{text, callback_data}], ...]. 텔레그램 응답(json)을 돌려준다."""
+    data = {"chat_id": chat_id, "text": text}
+    if buttons:
+        data["reply_markup"] = json.dumps({"inline_keyboard": buttons}, ensure_ascii=False)
+    r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data=data, timeout=10)
     r.raise_for_status()
+    return r.json()
+
+def start_buttons(route_id):
+    """pre 알림의 '출발했어요' 버튼. telegram Edge Function이 trip:start:<route_id>를 받아
+    trips 행(started_at=지금)을 만들고 다음 단계 버튼을 이어 보낸다."""
+    return [[{"text": "출발했어요", "callback_data": f"trip:start:{route_id}"}]]
+
+def send_pre(chat_id, route_id, head, lead, suffix=""):
+    """알림 1 (출발 lead분 전) — 버튼 있음."""
+    return send(chat_id, head + f"\n{lead}분 뒤 출발이에요." + suffix, start_buttons(route_id))
+
+def send_live(chat_id, head, lines, suffix=""):
+    """알림 2 (출발 시각, 실시간 보정) — 버튼 없음."""
+    return send(chat_id, head + "\n지금 나갈 시간이에요." + ("\n" + "\n".join(lines) if lines else "") + suffix)
 
 # ---------- 통계 (조연준 Estimator.quantile과 같은 선형보간 분위수) ----------
 def quantile(values, p):
@@ -530,12 +548,16 @@ def main():
 
         head = f"[TransFit] {route['name']}\n도착 목표 {arrive:%H:%M} · 출발 권장 {depart:%H:%M}\n소요 {dur//60}분 — {basis}"
 
-        if TEST:
+        if TEST:   # 실제 알림과 같은 함수로 pre(버튼) · live(버튼 없음) 두 통
             lines = live_lines(segments, now)
             for l in lines:
                 print("    |", l)
-            send(chat_id, head + "\n(테스트 실행)" + ("\n" + "\n".join(lines) if lines else ""))
-            print("    TEST 발송"); continue
+            res = send_pre(chat_id, route["id"], head, lead, "\n(테스트 실행)")
+            kb = ((res.get("result") or {}).get("reply_markup") or {}).get("inline_keyboard") or []
+            print("    TEST pre 발송 · 버튼:", [(b.get("text"), b.get("callback_data")) for row in kb for b in row] or "없음")
+            res = send_live(chat_id, head, lines, "\n(테스트 실행)")
+            print("    TEST live 발송 · 버튼:", "있음" if (res.get("result") or {}).get("reply_markup") else "없음")
+            continue
 
         # 알림 1: 출발 lead_min 전 구간
         if depart - timedelta(minutes=lead) <= now < depart:
@@ -546,8 +568,8 @@ def main():
                 # ignore-duplicates라 새로 들어갔는지 알 수 없어 sent_at으로 판정: 방금 생긴 행이면 보낸다
                 sent_at = datetime.fromisoformat(already[0]["sent_at"].replace("Z", "+00:00"))
                 if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
-                    send(chat_id, head + f"\n{lead}분 뒤 출발이에요.")
-                    print("    pre 발송")
+                    send_pre(chat_id, route["id"], head, lead)
+                    print("    pre 발송 (출발했어요 버튼)")
             except Exception as e:
                 print("    pre 실패:", redact(e))
 
@@ -559,8 +581,7 @@ def main():
                 already = sb_get("notifications", {"route_id": f"eq.{route['id']}", "date": f"eq.{today}", "kind": "eq.live", "select": "sent_at"})
                 sent_at = datetime.fromisoformat(already[0]["sent_at"].replace("Z", "+00:00"))
                 if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
-                    lines = live_lines(segments, now)
-                    send(chat_id, head + "\n지금 나갈 시간이에요." + ("\n" + "\n".join(lines) if lines else ""))
+                    send_live(chat_id, head, live_lines(segments, now))
                     print("    live 발송")
             except Exception as e:
                 print("    live 실패:", redact(e))

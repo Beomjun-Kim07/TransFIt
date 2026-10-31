@@ -35,6 +35,26 @@ sec, why = w.estimate_duration(route, [], five[:4] + [trip(43, True)])  # 정상
 ok(sec == 3000 and "4/5" in why, f"제외하면 4회라 기준값 사용 ({why})")
 ok(w.estimate_duration(route, [], five)[0] == q90, "excluded 키가 없는 행(컬럼 없음)·false는 그대로 사용")
 
+print("== 텔레그램 버튼 (실제로 보내지 않음)")
+import json
+sent = []
+class FakeResp:
+    def raise_for_status(self): pass
+    def json(self): return {"ok": True, "result": {}}
+real_post = w.requests.post
+w.requests.post = lambda url, data=None, timeout=None: (sent.append(data), FakeResp())[1]
+try:
+    w.send_pre("1", 7, "[TransFit] 통학", 30)
+    w.send_live("1", "[TransFit] 통학", ["지금 나가면 노원역 도착 후 대기 2분"])
+finally:
+    w.requests.post = real_post
+pre, live = sent
+kb = json.loads(pre["reply_markup"])["inline_keyboard"] if "reply_markup" in pre else []
+ok(kb == [[{"text": "출발했어요", "callback_data": "trip:start:7"}]], f"pre 알림 버튼 = {kb}")
+ok(pre["text"].endswith("30분 뒤 출발이에요."), "pre 문구 그대로")
+ok("reply_markup" not in live and "대기 2분" in live["text"], "live 알림엔 버튼 없음")
+ok(len(f"trip:start:{2**31 - 1}".encode()) <= 64, "callback_data 64바이트 제한 안")
+
 print("== 방향 판정 (가짜 데이터)")
 def tr(sid, upd, tln, cur, nxt, term, bar="120", no="1"):
     return dict(subwayId=sid, updnLine=upd, trainLineNm=tln, statnId=str(cur), statnTid=str(nxt), bstatnId=str(term),
