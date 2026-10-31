@@ -149,6 +149,9 @@
   .fchip { flex:0 0 auto; min-height:34px; padding:0 14px; border-radius:999px; border:0; background:var(--fill); font-size:15px; color:var(--label) }
   .fchip[aria-pressed="true"] { background:var(--accent); color:#fff; font-weight:600 }
   .rec.off .grow { opacity:.4 }
+  .adv { margin-top:35px } .adv > summary { display:block }
+  .adv > summary .chev { color:var(--label3); stroke-width:2.4 } .adv[open] > summary .chev { transform:rotate(90deg) }
+  .adv > summary:active .cell { background:var(--fill) }
   .rowbtn svg.disc { width:14px; height:14px; stroke-width:2.6; color:var(--label3) }   /* iOS 오른쪽 > */
   /* 기록 상세: 밀려 들어오는 화면. 탭바(20)보다 아래, 본문보다 위 */
   .push { position:fixed; inset:0; z-index:19; background:var(--bg); overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
@@ -319,13 +322,17 @@
       <div class="ghead">경로별 알림</div>
       <div id="routeSettings"></div>
       <div class="gfoot">신뢰 수준 90% = 내 기록 10번 중 9번은 늦지 않는 시각. 높일수록 일찍 출발해요.</div>
-      <div class="ghead">자동화 · 단축어·앱 기록</div>
-      <div id="autoBody"><div class="group"><div class="cell sub">불러오는 중…</div></div></div>
       <div class="ghead">계정</div>
       <div class="group">
         <div class="cell"><span class="grow">이메일</span><span class="sub" id="acctEmail" style="overflow-wrap:anywhere;text-align:right"></span></div>
         <button class="cell tbtn danger" style="width:100%;justify-content:center;border:0;background:none" onclick="signOut()">로그아웃</button>
       </div>
+      <!-- 고급: 단축어·안드로이드 앱 자동 기록용 토큰·route_id (기본 접힘) -->
+      <details class="adv" id="advBox">
+        <summary class="group"><div class="cell"><span class="grow">고급 · 자동 기록</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></div></summary>
+        <div class="gfoot" style="margin-bottom:12px">아이폰 단축어·안드로이드 앱이 버튼 없이 출발·도착을 기록할 때 쓰는 값이에요.</div>
+        <div id="autoBody"><div class="group"><div class="cell sub">불러오는 중…</div></div></div>
+      </details>
       <div class="gfoot" style="margin-top:24px">데이터: 서울열린데이터광장(지하철 실시간 도착) · 공공데이터포털·서울특별시(버스 정류소·도착) · 카카오(장소 검색·길찾기)</div>
     </section>
   </main>
@@ -1301,7 +1308,7 @@ function renderAuto() {
       <a class="cell rowbtn accent" href="${SHORTCUTS_DOC}" target="_blank" rel="noopener"><span class="grow">단축어 만드는 법 (docs/shortcuts.md)</span>${ICON_OUT}</a>
       <button class="cell rowbtn danger" ${reissuing ? "disabled" : ""} onclick="reissueToken()">${reissuing ? "만드는 중…" : apiToken ? "토큰 재발급" : "토큰 만들기"}</button>
     </div>
-    <div class="gfoot">아이폰 단축어·안드로이드 앱이 출발·도착을 기록할 때 토큰과 route_id를 넣어요. 토큰은 비밀번호처럼 다루고, 새어 나갔으면 재발급하세요 — 이전 토큰은 바로 막혀요.</div>`;
+    <div class="gfoot">토큰은 비밀번호처럼 다루고, 새어 나갔으면 재발급하세요 — 이전 토큰은 바로 막혀요.</div>`;
 }
 function copyToken() {
   if (!apiToken) return;
