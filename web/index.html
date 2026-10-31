@@ -55,6 +55,7 @@
   input::placeholder { color:var(--label3) }
   input:focus, select:focus { outline:none } input:focus-visible, select:focus-visible { box-shadow:0 0 0 2px var(--accent) }
   .group input { background:transparent; border-radius:0; padding:11px 16px }
+  .group input:focus-visible { box-shadow:none }   /* iOS 그룹 리스트 입력칸은 테두리 없이 커서만 */
   button { font:inherit; color:inherit; cursor:pointer; touch-action:manipulation; -webkit-appearance:none; appearance:none }
   .btn { display:flex; align-items:center; justify-content:center; width:100%; min-height:50px; padding:0 16px; border:0; border-radius:12px;
          font-size:17px; font-weight:600; text-decoration:none; background:var(--accent-soft); color:var(--accent) }
@@ -112,6 +113,24 @@
   .places .stack { flex:1 }
   .place { display:flex; align-items:center; gap:10px; padding-left:16px }
   .place input { padding-left:0 }
+  /* 장소 자동완성: 입력칸 바로 아래 떠 있는 iOS식 리스트 */
+  .places-wrap { position:relative }
+  .aclist { position:absolute; left:0; right:0; z-index:15; max-height:min(55vh, 420px); overflow-y:auto; -webkit-overflow-scrolling:touch;
+            background:var(--card); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.18), 0 0 0 .5px var(--sep) }
+  .aclist .cell { width:100%; border:0; background:none; text-align:left; padding:9px 16px; min-height:52px }
+  .aclist .cell:active, .aclist .cell.on { background:var(--fill) }
+  .aclist .cell + .cell::before { left:58px }
+  .aclist .nm { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .aclist .ad { font-size:13px; color:var(--label2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .aclist .msg { padding:12px 16px; font-size:13px; color:var(--label2) }
+  .caticon { width:30px; height:30px; flex:0 0 auto; border-radius:50%; background:var(--fill); color:var(--label2); display:flex; align-items:center; justify-content:center; font-size:15px }
+  .caticon svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round }
+  .caticon.here { background:var(--accent-soft) }
+  /* 결과 필터 칩·정렬 */
+  .fchip[aria-disabled="true"] { opacity:.35; cursor:default }
+  .fchip b { font-weight:700; margin-left:3px }
+  .segctl.sort { grid-template-columns:repeat(4, 1fr) }
+  .segctl.sort button { font-size:14px }
   .pdot { width:10px; height:10px; border-radius:50%; flex:0 0 auto; border:2.5px solid var(--label2) } .pdot.to { background:var(--label); border-color:var(--label) }
   .inline-time { width:auto; min-height:36px; padding:6px 11px; border-radius:8px; font-variant-numeric:tabular-nums }
   .opt-top { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap }
@@ -210,15 +229,19 @@
 
     <!-- 길찾기 -->
     <section id="tab-find" class="hidden">
-      <div class="group places">
-        <div class="stack">
-          <label class="cell place"><i class="pdot"></i><input id="rFrom" placeholder="출발지 (예: 노원역)" enterkeyhint="next" aria-label="출발지"></label>
-          <label class="cell place"><i class="pdot to"></i><input id="rTo" placeholder="도착지 (예: 연세대학교 정문)" enterkeyhint="search" aria-label="도착지"
-            onkeydown="if (event.key === 'Enter') findRoutes()"></label>
+      <div class="places-wrap" id="placesWrap">
+        <div class="group places">
+          <div class="stack">
+            <label class="cell place" id="cellFrom"><i class="pdot"></i><input id="rFrom" placeholder="출발지 (예: 노원역)" enterkeyhint="next" aria-label="출발지"
+              autocomplete="off" role="combobox" aria-controls="acList" aria-expanded="false" oninput="acInput('from')" onfocus="acOpen('from')" onkeydown="acKey(event, 'from')"></label>
+            <label class="cell place" id="cellTo"><i class="pdot to"></i><input id="rTo" placeholder="도착지 (예: 연세대학교 정문)" enterkeyhint="search" aria-label="도착지"
+              autocomplete="off" role="combobox" aria-controls="acList" aria-expanded="false" oninput="acInput('to')" onfocus="acOpen('to')" onkeydown="acKey(event, 'to')"></label>
+          </div>
+          <button class="iconbtn" style="margin-right:6px" onclick="swapPlaces()" aria-label="출발지와 도착지 바꾸기">
+            <svg viewBox="0 0 24 24"><path d="M8 19.5V5M4.5 8.5 8 5l3.5 3.5M16 4.5V19M12.5 15.5 16 19l3.5-3.5"/></svg>
+          </button>
         </div>
-        <button class="iconbtn" style="margin-right:6px" onclick="swapPlaces()" aria-label="출발지와 도착지 바꾸기">
-          <svg viewBox="0 0 24 24"><path d="M8 19.5V5M4.5 8.5 8 5l3.5 3.5M16 4.5V19M12.5 15.5 16 19l3.5-3.5"/></svg>
-        </button>
+        <div class="aclist hidden" id="acList" role="listbox" aria-label="장소 후보"></div>
       </div>
       <div class="group" style="margin-top:16px">
         <label class="cell"><span class="grow">도착 목표 시각</span><input id="rArrive" class="inline-time" type="time" value="09:00"></label>
@@ -227,6 +250,10 @@
       <div class="segctl" id="rDays" role="group" aria-label="알림 받을 요일"></div>
       <button class="btn filled" id="btnFind" style="margin-top:20px" onclick="findRoutes()">길찾기</button>
       <div id="findMsg" class="gfoot" style="margin-bottom:10px"></div>
+      <div id="resControls" class="hidden">
+        <div class="filters" id="resFilter" role="group" aria-label="교통수단 필터" style="margin:0 -16px 10px"></div>
+        <div class="segctl sort" id="resSort" role="group" aria-label="정렬" style="margin-bottom:14px"></div>
+      </div>
       <div id="routeOptions"></div>
 
       <details class="card" id="manualBox" style="padding:0 16px">
@@ -650,7 +677,116 @@ function renderDays() {
     `<button type="button" aria-pressed="${!!on}" onclick="newDays[${i}]^=1;renderDays()">${DAY_KO[i]}</button>`).join("");
 }
 const daysStr = () => newDays.map((on, i) => on ? DAY_EN[i] : "-").join("");
-function swapPlaces() { const a = $("rFrom").value; $("rFrom").value = $("rTo").value; $("rTo").value = a; }
+function swapPlaces() {
+  const a = $("rFrom").value; $("rFrom").value = $("rTo").value; $("rTo").value = a;
+  [picked.from, picked.to] = [picked.to, picked.from]; closeAc();
+}
+
+// ---------- 장소 자동완성 (places 함수, GET ?q=) ----------
+// 고른 장소의 좌표를 기억했다가 route에 fromX/fromY/toX/toY로 넘긴다. 맨 위엔 현재 위치·최근 선택 3개.
+const picked = { from: null, to: null };   // { name, address, x(경도), y(위도), category }
+const RECENT_KEY = "transfit-recent-places";
+let acSide = null, acItems = [], acTimer = null, acSeq = 0, acAbort = null, acResults = [], acActive = -1;
+const inputOf = side => $(side === "from" ? "rFrom" : "rTo");
+const recentPlaces = () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]").slice(0, 3); } catch { return []; } };
+function rememberPlace(p) {
+  const same = q => q.name === p.name && Math.abs(q.x - p.x) < 1e-6 && Math.abs(q.y - p.y) < 1e-6;
+  const list = [p, ...recentPlaces().filter(q => !same(q))].slice(0, 3);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch {}
+}
+async function placesSearch(q, signal) {
+  const r = await fetch(`${C.SUPABASE_URL}/functions/v1/places?q=${encodeURIComponent(q)}`, { signal });
+  const j = await r.json();
+  if (!r.ok || !Array.isArray(j)) throw new Error(j?.error || `장소 검색 실패 ${r.status}`);
+  return j;
+}
+const ICON = {   // SF Symbols 느낌의 선 아이콘 (직접 그림)
+  pin: `<path d="M12 20.5s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z"/><circle cx="12" cy="10.5" r="2.2"/>`,
+  train: `<rect x="6" y="3.5" width="12" height="13" rx="3"/><path d="M6 10.5h12M9 20.5l1.5-4M15 20.5l-1.5-4"/><circle cx="9.5" cy="13.5" r=".6" fill="currentColor"/><circle cx="14.5" cy="13.5" r=".6" fill="currentColor"/>`,
+  bus: `<rect x="5.5" y="3.5" width="13" height="14" rx="2.5"/><path d="M5.5 10h13M8 20.5v-3M16 20.5v-3"/><circle cx="8.8" cy="14" r=".6" fill="currentColor"/><circle cx="15.2" cy="14" r=".6" fill="currentColor"/>`,
+  school: `<path d="M3 9.5 12 5l9 4.5-9 4.5z"/><path d="M7 11.5v4c0 1.2 2.2 2.5 5 2.5s5-1.3 5-2.5v-4"/>`,
+  food: `<path d="M6 8.5h10v4a5 5 0 0 1-10 0z"/><path d="M16 9.5h1.5a2 2 0 0 1 0 4H16M8.5 3.5v2M11 3.5v2M13.5 3.5v2"/>`,
+  building: `<path d="M5 20.5V8l7-4 7 4v12.5M3.5 20.5h17M9.5 20.5v-4h5v4M9 11h.01M12 11h.01M15 11h.01"/>`,
+  shop: `<path d="M5 9.5h14l-1 11H6zM9 9.5V7a3 3 0 0 1 6 0v2.5"/>`,
+  clock: `<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>`,
+};
+function catIcon(cat) {
+  const c = cat || "";
+  const k = /지하철|역$/.test(c) ? "train" : /버스|정류/.test(c) ? "bus" : /학교|학원|대학/.test(c) ? "school"
+    : /음식|카페|식당|베이커리/.test(c) ? "food" : /편의점|마트|다이소|올리브영|쇼핑|상가/.test(c) ? "shop"
+    : /공공|기관|병원|은행|오피스|아파트|주거|빌딩|센터/.test(c) ? "building" : "pin";
+  return `<svg viewBox="0 0 24 24">${ICON[k]}</svg>`;
+}
+function acOpen(side) { acSide = side; acResults = []; acRender(); acInput(side, true); }
+function closeAc() {
+  acSide = null; acActive = -1; clearTimeout(acTimer); acAbort?.abort();
+  $("acList").classList.add("hidden"); ["rFrom", "rTo"].forEach(id => $(id).setAttribute("aria-expanded", "false"));
+}
+function acInput(side, focusOnly) {
+  acSide = side;
+  const q = inputOf(side).value.trim();
+  if (!focusOnly && picked[side] && picked[side].name !== q) picked[side] = null;   // 고친 글자는 좌표와 안 맞으니 잊는다
+  clearTimeout(acTimer); acAbort?.abort();
+  if (q.length < 2 || picked[side]?.name === q) { acResults = []; acRender(); return; }
+  acRender("찾는 중…");
+  acTimer = setTimeout(async () => {   // 300ms 디바운스, 늦게 온 옛 응답은 버림
+    const seq = ++acSeq; acAbort = new AbortController();
+    try {
+      const list = await placesSearch(q, acAbort.signal);
+      if (seq !== acSeq || acSide !== side) return;
+      acResults = list; acRender(list.length ? "" : "검색 결과가 없어요");
+    } catch (e) {
+      if (e.name !== "AbortError" && seq === acSeq) { acResults = []; acRender("장소 검색이 안 돼요: " + e.message); }
+    }
+  }, 300);
+}
+function acRender(msg = "") {
+  if (!acSide) return;
+  const recent = recentPlaces();
+  const key = p => `${p.name}|${(+p.x).toFixed(5)}|${(+p.y).toFixed(5)}`, seen = new Set(recent.map(key));
+  acItems = [{ here: true }, ...recent.map(p => ({ ...p, recent: true })), ...acResults.filter(p => !seen.has(key(p)))];
+  acActive = Math.min(acActive, acItems.length - 1);
+  $("acList").innerHTML = acItems.map((p, i) => p.here
+    ? `<button class="cell${i === acActive ? " on" : ""}" role="option" onclick="acPick(${i})"><span class="caticon here">📍</span>
+         <div class="grow"><div class="nm">현재 위치</div><div class="ad" id="hereMsg">지금 있는 곳에서 출발·도착</div></div></button>`
+    : `<button class="cell${i === acActive ? " on" : ""}" role="option" onclick="acPick(${i})"><span class="caticon">${p.recent ? `<svg viewBox="0 0 24 24">${ICON.clock}</svg>` : catIcon(p.category)}</span>
+         <div class="grow"><div class="nm">${esc(p.name)}</div><div class="ad">${esc([p.recent ? "최근" : p.category, p.address].filter(Boolean).join(" · "))}</div></div></button>`).join("")
+    + (msg ? `<div class="msg">${esc(msg)}</div>` : "");
+  const cell = $(acSide === "from" ? "cellFrom" : "cellTo");   // 고르고 있는 입력칸 바로 아래에 띄운다
+  $("acList").style.top = `${cell.offsetTop + cell.offsetHeight + 6}px`;
+  $("acList").classList.remove("hidden"); inputOf(acSide).setAttribute("aria-expanded", "true");
+}
+function acPick(i) {
+  const side = acSide, p = acItems[i]; if (!side || !p) return;
+  if (p.here) return pickHere(side);
+  const place = { name: p.name, address: p.address, x: +p.x, y: +p.y, category: p.category };
+  picked[side] = place; inputOf(side).value = place.name; rememberPlace(place); closeAc();
+  if (side === "from" && !$("rTo").value.trim()) $("rTo").focus();
+}
+function pickHere(side) {
+  if (!navigator.geolocation) return toast("이 브라우저는 위치를 못 써요");
+  const m = $("hereMsg"); if (m) m.textContent = "위치 확인 중…";
+  navigator.geolocation.getCurrentPosition(pos => {
+    picked[side] = { name: "현재 위치", x: pos.coords.longitude, y: pos.coords.latitude, category: "현재 위치" };
+    inputOf(side).value = "현재 위치"; closeAc();
+    if (side === "from" && !$("rTo").value.trim()) $("rTo").focus();
+  }, err => {
+    const t = err.code === 1 ? "위치 권한이 꺼져 있어요. 설정에서 허용해 주세요." : "현재 위치를 못 찾았어요.";
+    if ($("hereMsg")) $("hereMsg").textContent = t; else toast(t);
+  }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+}
+function acKey(e, side) {
+  const open = !$("acList").classList.contains("hidden");
+  if (e.key === "Escape") return closeAc();
+  if (open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault(); acActive = (acActive + (e.key === "ArrowDown" ? 1 : -1) + acItems.length) % acItems.length; return acRender();
+  }
+  if (e.key === "Enter") {
+    if (open && acActive >= 0) { e.preventDefault(); return acPick(acActive); }
+    closeAc(); if (side === "to") findRoutes(); else $("rTo").focus();
+  }
+}
+document.addEventListener("pointerdown", e => { if (acSide && !e.target.closest("#placesWrap")) closeAc(); });   // 바깥을 누르면 닫힘
 const fareOf = r => { const v = typeof r.fare === "object" ? r.fare?.value : r.fare; return v ? `${Number(v).toLocaleString()}원` : ""; };
 function stepRail(steps) {
   return railHtml(steps.map((st, i) => {
@@ -674,12 +810,29 @@ function optionCard(r, i) {
     <button class="btn filled" style="margin-top:6px" onclick="saveRoute(${i})">이 경로 저장</button>
   </article>`;
 }
+// 좌표: 고른 후보가 있으면 그것, 없으면 입력한 이름으로 places 첫 결과 (route의 이름 검색과 같은 방식)
+async function coordsFor(side, text) {
+  const p = picked[side];
+  if (p && p.name === text) return p;
+  const list = await placesSearch(text);
+  if (!list.length) throw new Error(`'${text}'을(를) 찾지 못했어요`);
+  return list[0];
+}
 async function findRoutes() {
+  closeAc();
   const from = $("rFrom").value.trim(), to = $("rTo").value.trim();
   if (!from || !to) { $("findMsg").textContent = "출발지와 도착지를 입력해요."; return; }
   $("btnFind").disabled = true;
-  $("findMsg").textContent = "길찾기 중…"; $("routeOptions").innerHTML = "";
-  const { data, error } = await sb.functions.invoke("route", { body: { from, to } });
+  $("findMsg").textContent = "길찾기 중…"; $("routeOptions").innerHTML = ""; $("resControls").classList.add("hidden");
+  let body = { from, to };
+  try {
+    const [a, b] = await Promise.all([coordsFor("from", from), coordsFor("to", to)]);
+    body = { from, to, fromX: a.x, fromY: a.y, toX: b.x, toY: b.y };
+  } catch (e) {
+    if (/찾지 못했어요/.test(e.message)) { $("btnFind").disabled = false; $("findMsg").textContent = e.message; return; }
+    // places가 안 되면 이름만 넘겨 route가 직접 찾게 한다
+  }
+  const { data, error } = await sb.functions.invoke("route", { body });
   $("btnFind").disabled = false;
   if (error || data?.error) {
     let msg = data?.error || error.message;
@@ -687,8 +840,35 @@ async function findRoutes() {
     $("findMsg").textContent = "실패: " + msg; return;
   }
   found = data;
-  $("findMsg").textContent = `${data.from.name} → ${data.to.name} · 경로 ${data.routes.length}개`;
-  $("routeOptions").innerHTML = data.routes.slice(0, 6).map(optionCard).join("");   // time 단위: 초
+  renderOptions();
+}
+
+// ---------- 결과 필터·정렬 (세션 동안 유지) ----------
+const RES_FILTERS = [["all", "전체"], ["bus", "버스"], ["subway", "지하철"], ["mixed", "버스+지하철"]];
+const RES_SORTS = [["best", "최적"], ["time", "최소시간"], ["transfer", "최소환승"], ["walk", "최소도보"]];
+const sess = { get: k => { try { return sessionStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} } };
+let resFilter = sess.get("transfit-res-filter") || "all", resSort = sess.get("transfit-res-sort") || "best";
+function routeKind(r) {   // 걷기 말고 탄 것: 버스만 / 지하철만 / 둘 다
+  const t = new Set(r.steps.map(s => s.type).filter(x => x !== "WALKING"));
+  return t.has("BUS") && t.has("SUBWAY") ? "mixed" : t.has("BUS") ? "bus" : t.has("SUBWAY") ? "subway" : "walk";
+}
+const walkSec = r => r.steps.filter(s => s.type === "WALKING").reduce((a, s) => a + (s.time || 0), 0);
+function setResFilter(v) { resFilter = v; sess.set("transfit-res-filter", v); renderOptions(); }
+function setResSort(v) { resSort = v; sess.set("transfit-res-sort", v); renderOptions(); }
+function renderOptions() {
+  if (!found) return;
+  const all = found.routes.map((r, i) => ({ r, i, kind: routeKind(r) }));   // i = 카카오 순서 (저장할 때 이 번호를 쓴다)
+  const count = k => k === "all" ? all.length : all.filter(o => o.kind === k).length;
+  $("resFilter").innerHTML = RES_FILTERS.map(([k, n]) => { const c = count(k);
+    return `<button class="fchip" aria-pressed="${resFilter === k}" aria-disabled="${!c}" ${c ? `onclick="setResFilter('${k}')"` : ""}>${n}<b>${c}</b></button>`; }).join("");
+  $("resSort").innerHTML = RES_SORTS.map(([k, n]) => `<button type="button" aria-pressed="${resSort === k}" onclick="setResSort('${k}')">${n}</button>`).join("");
+  $("resControls").classList.toggle("hidden", !all.length);
+  const by = { best: o => o.i, time: o => o.r.totalTime, transfer: o => (o.r.transfers ?? 0) * 1e6 + o.r.totalTime, walk: o => walkSec(o.r) * 1e3 + o.r.totalTime };
+  const shown = all.filter(o => resFilter === "all" || o.kind === resFilter).sort((a, b) => by[resSort](a) - by[resSort](b) || a.i - b.i);
+  $("findMsg").textContent = `${found.from.name} → ${found.to.name} · 경로 ${all.length}개`;
+  $("routeOptions").innerHTML = shown.length ? shown.map(o => optionCard(o.r, o.i)).join("")   // time 단위: 초
+    : all.length ? `<div class="card empty"><b>이 조건의 경로가 없어요</b><button class="btn" style="margin-top:16px" onclick="setResFilter('all')">전체 보기</button></div>`
+    : `<div class="card empty"><b>경로가 없어요</b><div class="sub">출발지나 도착지를 바꿔 보세요.</div></div>`;
 }
 async function saveRoute(i) {
   if (!newDays.some(Boolean)) return alert("알림 받을 요일을 하나 이상 골라요.");
@@ -700,6 +880,7 @@ async function saveRoute(i) {
   const { error: e2 } = await sb.from("segments").insert(segmentRows(r, route.id));
   if (e2) return alert(e2.message);
   $("routeOptions").innerHTML = ""; $("findMsg").textContent = ""; $("rFrom").value = $("rTo").value = "";
+  picked.from = picked.to = null; $("resControls").classList.add("hidden");
   await loadAll(); setTab("home"); toast("경로를 저장했어요");
   $("rc-" + route.id)?.scrollIntoView({ behavior:"smooth", block:"start" });
 }
