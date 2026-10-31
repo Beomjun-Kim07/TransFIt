@@ -3,7 +3,8 @@
 //
 // 처리하는 것
 //  1. `/start <link_code>`  → users.link_code로 사용자를 찾아 telegram_chat_id 저장 → "연결됐어요" 답장
-//  2. callback_query (역사 안 버튼) → trips 에 시각 기록
+//  2. `/next` → 내 경로 전부의 오늘 출발 시각 (watch.py estimate_duration과 같은 계산, 실시간 보정은 없음)
+//  3. callback_query (역사 안 버튼) → trips 에 시각 기록
 //     버튼 data 형식 (watch.py가 inline_keyboard로 보낼 때 이 형식을 쓴다):
 //       trip:start:<route_id>        집 출발 → trips 행 새로 만들고(started_at=now) 다음 버튼 보냄
 //       trip:platform_at:<trip_id>   승강장 도착
@@ -58,13 +59,75 @@ function nextButtons(trip: Record<string, unknown>) {
   return rows.length ? { reply_markup: { inline_keyboard: rows } } : {};
 }
 
+// ---------- /next: 출발 시각 계산 (watch.py estimate_duration / plan 과 같은 규칙) ----------
+const MIN_SAMPLES = 5, LOOKBACK_DAYS = 60, LATER = "(기록 쌓이면 바뀜)";
+const KST_MS = 9 * 3600 * 1000;
+
+// 선형보간 분위수 (조연준 Estimator.quantile, watch.py quantile 과 동일)
+function quantile(values: number[], p: number) {
+  const v = [...values].sort((a, b) => a - b);
+  const pos = (v.length - 1) * p, lo = Math.floor(pos), hi = Math.ceil(pos);
+  return v[lo] + (v[hi] - v[lo]) * (pos - lo);
+}
+// 계산에 쓰는 기록(초) = 도착까지 찍힘 + excluded 아님 + 3분~3시간
+function usableDurations(trips: any[]) {
+  const out: number[] = [];
+  for (const t of trips) {
+    if (t.excluded || !t.started_at || !t.ended_at) continue;
+    const d = (Date.parse(t.ended_at) - Date.parse(t.started_at)) / 1000;
+    if (d >= 180 && d <= 3 * 3600) out.push(d);
+  }
+  return out;
+}
+function estimateDuration(route: any, segments: any[], trips: any[]): [number, string] {
+  const durs = usableDurations(trips);
+  const conf = route.confidence ?? 90;
+  if (durs.length >= MIN_SAMPLES) return [Math.trunc(quantile(durs, conf / 100)), `내 기록 ${durs.length}회 ${conf}% 기준`];
+  if (route.baseline_sec) return [Math.trunc(route.baseline_sec), `카카오 예상 기준${LATER}`];
+  const segSum = segments.reduce((a, s) => a + (s.expected_sec || 0), 0);
+  if (segSum) return [Math.trunc(segSum), `구간 예상 합 기준${LATER}`];
+  return [(route.fallback_min ?? 40) * 60, `기본값 기준${LATER}`];
+}
+const hhmm = (m: number) => { m = ((m % 1440) + 1440) % 1440; return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; };
+
+async function nextText(chat_id: number) {
+  const [user] = await db("GET", `users?telegram_chat_id=eq.${chat_id}&select=id`);
+  if (!user) return "연결된 계정이 없어요. 웹앱의 '텔레그램 연결' 링크로 먼저 연결해 주세요.";
+  const routes = await db("GET", `routes?user_id=eq.${user.id}&order=id&select=*`);
+  if (!routes.length) return "저장된 경로가 없어요. 웹앱에서 길찾기 → 저장을 먼저 해 주세요.";
+  const now = new Date();
+  const kst = new Date(now.getTime() + KST_MS);
+  const weekday = (kst.getUTCDay() + 6) % 7;                       // 월=0 (watch.py와 같음)
+  const since = new Date(now.getTime() - LOOKBACK_DAYS * 86400 * 1000).toISOString();
+  const lines: string[] = [];
+  for (const r of routes) {
+    const [segments, trips] = await Promise.all([
+      db("GET", `segments?route_id=eq.${r.id}&order=seq&select=expected_sec`),
+      db("GET", `trips?route_id=eq.${r.id}&started_at=gte.${encodeURIComponent(since)}&select=started_at,ended_at,excluded`),
+    ]);
+    const [dur, basis] = estimateDuration(r, segments, trips);
+    const mins = Math.ceil(dur / 60);                               // 1분 올림 → 출발 시각과 '예상 N분'이 일치
+    const [hh, mm] = String(r.arrive_by).split(":").map(Number);
+    const arriveMin = hh * 60 + mm;
+    const days = r.active_days || "MTWTF";
+    const active = weekday < days.length && days[weekday] !== "-";
+    lines.push(`${r.name} · 도착 ${hhmm(arriveMin)} → 출발 ${hhmm(arriveMin - mins)} (예상 ${mins}분 · ${basis})${active ? "" : " (오늘 쉼)"}`);
+  }
+  return lines.join("\n");
+}
+
 // ---------- 메시지: /start <link_code> ----------
-async function onMessage(m: any) {
+async function onMessage(m: any): Promise<string | void> {
   const chat_id: number = m.chat.id;
   const text: string = (m.text ?? "").trim();
+  if (/^\/next\b/.test(text)) {
+    const t = await nextText(chat_id);
+    await reply(chat_id, t);
+    return t;
+  }
   const mt = text.match(/^\/start(?:\s+(\S+))?/);
   if (!mt) {
-    await reply(chat_id, "TransFit 봇이에요. 웹앱에서 '텔레그램 연결' 링크를 눌러 연결해 주세요.");
+    await reply(chat_id, "TransFit 봇이에요. 웹앱에서 '텔레그램 연결' 링크를 눌러 연결해 주세요.\n/next — 오늘 출발 시각 바로 보기");
     return;
   }
   const code = mt[1];
@@ -130,8 +193,10 @@ Deno.serve(async (req) => {
   }
   try {
     const upd = await req.json();
-    if (upd.message) await onMessage(upd.message);
-    else if (upd.callback_query) await onCallback(upd.callback_query);
+    if (upd.message) {
+      const t = await onMessage(upd.message);
+      if (t) return new Response(t);                               // /next 답장 본문 (텔레그램은 무시, curl 테스트용)
+    } else if (upd.callback_query) await onCallback(upd.callback_query);
   } catch (e) {
     console.error(e);
   }
