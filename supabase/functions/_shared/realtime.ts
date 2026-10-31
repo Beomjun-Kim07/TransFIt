@@ -42,7 +42,7 @@ type A = any;
 type Ctx = { env: Env; f: typeof fetch; now: Date; log: (m: string) => void };
 const ctxOf = (env: Env): Ctx => ({ env, f: env.fetch ?? fetch, now: env.now ?? new Date(), log: env.log ?? ((m) => console.log(m)) });
 const toInt = (v: unknown) => parseInt(String(v ?? "0"), 10) || 0;
-const isRide = (s: Seg) => s.kind === "subway" || s.kind === "bus";
+export const isRide = (s: Seg) => s.kind === "subway" || s.kind === "bus";
 const mins = (sec: number) => Math.round(sec / 60);
 export const waitTxt = (sec: number) => { const m = Math.floor(sec / 60); return m ? `${m}분` : "1분 미만"; };
 
