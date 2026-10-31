@@ -49,6 +49,9 @@
   .cell { position:relative; display:flex; align-items:center; gap:12px; min-height:44px; padding:11px 16px }
   .cell + .cell::before { content:""; position:absolute; top:0; left:16px; right:0; border-top:.5px solid var(--sep) }
   .grow { flex:1; min-width:0; overflow-wrap:anywhere }
+  .rowbtn { width:100%; border:0; background:none; text-align:left; color:inherit; text-decoration:none; font-size:17px }
+  .rowbtn.accent { color:var(--accent) } .rowbtn:active:not(:disabled) { background:var(--fill) } .rowbtn:disabled { opacity:.4 }
+  .rowbtn svg { width:20px; height:20px; flex:none; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round }
 
   /* 입력·버튼 */
   input, select { font:inherit; font-size:17px; color:var(--label); border:0; border-radius:10px; background:var(--fill); min-height:44px; padding:11px 12px; width:100% }
@@ -291,6 +294,8 @@
       <div class="ghead">경로별 알림</div>
       <div id="routeSettings"></div>
       <div class="gfoot">신뢰 수준 90% = 내 기록 10번 중 9번은 늦지 않는 시각. 높일수록 일찍 출발해요.</div>
+      <div class="ghead">자동화 · 단축어·앱 기록</div>
+      <div id="autoBody"><div class="group"><div class="cell sub">불러오는 중…</div></div></div>
       <div class="ghead">계정</div>
       <div class="group">
         <div class="cell"><span class="grow">이메일</span><span class="sub" id="acctEmail" style="overflow-wrap:anywhere;text-align:right"></span></div>
@@ -336,7 +341,7 @@ const WALK_KMH = 3.7, MIN_SAMPLES = 5, OPEN_MS = 3 * 3600e3, LOOKBACK_MS = 60 * 
 const DAY_KO = "월화수목금토일", DAY_EN = "MTWTFSS";   // active_days: 월=0 … 일=6, '-'는 쉬는 날
 const TABS = ["home", "find", "records", "settings"], TITLES = { home:"TransFit", find:"길찾기", records:"기록", settings:"설정" };
 let user = null, shownFor, tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "home";
-let routes = [], segsBy = {}, tripsAll = [], tgLinked = null;
+let routes = [], segsBy = {}, tripsAll = [], tgLinked = null, apiToken, reissuing = false;   // apiToken: undefined = 아직 못 읽음, null = 없음
 let busyId = null, skipTo = {}, newDays = [1,1,1,1,1,0,0], found = null, recFilter = "all", lastSync = 0;
 const openDetails = new Set();
 const $ = id => document.getElementById(id);
@@ -452,7 +457,7 @@ async function render() {
   document.body.classList.toggle("authed", !!user);   // 설치 안내를 탭바 위로 올린다
   $("auth").classList.toggle("hidden", !!user);
   $("app").classList.toggle("hidden", !user);
-  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; closeMenu(); return; }
+  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; closeMenu(); return; }
   showTab(); lastSync = Date.now();
   await Promise.all([loadTelegram(), loadAll()]);
 }
@@ -981,6 +986,56 @@ function renderSettings() {
       <label class="cell"><span class="grow">첫 알림</span><select class="inline" onchange="saveRouteField(${r.id},'lead_min',this.value)">${opts(LEADS, r.lead_min ?? 30, v => `출발 ${v}분 전`)}</select></label>
       <label class="cell"><span class="grow">신뢰 수준</span><select class="inline" onchange="saveRouteField(${r.id},'confidence',this.value)">${opts(CONFS, r.confidence ?? 90, v => `${v}%`)}</select></label>
     </div>`).join("") : `<div class="group"><div class="cell sub">저장된 경로가 없어요.</div></div>`;
+  renderAuto();
+}
+// 자동화 토큰: 아이폰 단축어·안드로이드 앱이 trip 함수로 trips에 기록할 때 쓰는 users.api_token (docs/shortcuts.md)
+const SHORTCUTS_DOC = "https://github.com/Beomjun-Kim07/TransFit/blob/main/docs/shortcuts.md";
+const ICON_COPY = `<svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.3"/><path d="M15.5 5.5v-.3a2 2 0 0 0-2-2H5.2a2 2 0 0 0-2 2v8.3a2 2 0 0 0 2 2h.3"/></svg>`;
+const ICON_OUT = `<svg viewBox="0 0 24 24"><path d="M8 16 16.5 7.5M9.5 7.5h7v7"/></svg>`;
+// DB 기본값 replace(gen_random_uuid()::text,'-','')와 같은 모양(16진 32자). PostgREST update엔 SQL 함수를 못 넣어 브라우저 난수로 만든다.
+const newToken = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+function copyText(s) {   // 클릭 직후 동기 호출해야 iOS Safari가 허용한다 (await 뒤에 쓰면 막힘)
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(s).then(() => true, () => legacyCopy(s));
+  return Promise.resolve(legacyCopy(s));
+}
+function legacyCopy(s) {
+  const ta = document.createElement("textarea");
+  ta.value = s; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;font-size:16px";
+  document.body.append(ta); ta.select(); ta.setSelectionRange(0, s.length);
+  let ok = false; try { ok = document.execCommand("copy"); } catch {}
+  ta.remove(); return ok;
+}
+function renderAuto() {
+  const el = $("autoBody"); if (!el) return;
+  if (apiToken === undefined) { el.innerHTML = `<div class="group"><div class="cell sub">불러오는 중…</div></div>`; return; }
+  const ids = routes.map(r => `<button class="cell rowbtn" onclick="copyRouteId(${r.id})" aria-label="${esc(r.name)} route_id ${r.id} 복사">
+      <span class="grow">${esc(r.name)}</span><span class="sub num">route_id ${r.id}</span><span class="accent">${ICON_COPY}</span></button>`).join("");
+  el.innerHTML = `<div class="group">
+      <div class="cell"><span class="grow">자동화 토큰</span><span class="sub num">${apiToken ? "••••••••" + esc(apiToken.slice(-4)) : "없음"}</span></div>
+      ${ids || `<div class="cell sub">경로를 저장하면 route_id가 여기 보여요.</div>`}
+    </div>
+    <button class="btn filled" style="margin-top:12px" ${apiToken ? "" : "disabled"} onclick="copyToken()">자동화 토큰 복사</button>
+    <div class="group" style="margin-top:12px">
+      <a class="cell rowbtn accent" href="${SHORTCUTS_DOC}" target="_blank" rel="noopener"><span class="grow">단축어 만드는 법 (docs/shortcuts.md)</span>${ICON_OUT}</a>
+      <button class="cell rowbtn danger" ${reissuing ? "disabled" : ""} onclick="reissueToken()">${reissuing ? "만드는 중…" : apiToken ? "토큰 재발급" : "토큰 만들기"}</button>
+    </div>
+    <div class="gfoot">아이폰 단축어·안드로이드 앱이 출발·도착을 기록할 때 토큰과 route_id를 넣어요. 토큰은 비밀번호처럼 다루고, 새어 나갔으면 재발급하세요 — 이전 토큰은 바로 막혀요.</div>`;
+}
+function copyToken() {
+  if (!apiToken) return;
+  copyText(apiToken).then(ok => toast(ok ? "토큰을 복사했어요" : "복사하지 못했어요"));
+}
+function copyRouteId(id) { copyText(String(id)).then(ok => toast(ok ? `route_id ${id} 복사했어요` : "복사하지 못했어요")); }
+async function reissueToken() {
+  if (reissuing) return;
+  if (apiToken && !confirm("새 토큰을 만들면 지금 토큰을 넣은 단축어·앱은 기록하지 못해요. 재발급할까요?")) return;
+  reissuing = true; renderAuto();
+  const { data, error } = await sb.from("users").update({ api_token: newToken() }).eq("id", user.id).select("api_token").single();
+  reissuing = false;
+  if (!error) apiToken = data.api_token;
+  renderAuto();
+  if (error) return alert("토큰을 만들지 못했어요: " + error.message);
+  toast("새 토큰을 만들었어요. 복사해서 단축어·앱에 넣어 주세요");
 }
 async function saveRouteField(id, f, v) {
   const r = routeById(id); if (!r) return;
@@ -992,11 +1047,11 @@ async function saveRouteField(id, f, v) {
 // 텔레그램
 const newCode = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, "0")).join("");
 async function profile() {
-  let { data, error } = await sb.from("users").select("telegram_chat_id, link_code").eq("id", user.id).maybeSingle();
+  let { data, error } = await sb.from("users").select("telegram_chat_id, link_code, api_token").eq("id", user.id).maybeSingle();
   if (error) throw error;
   if (!data) {   // 가입 트리거보다 먼저 만든 계정: 행을 만든다 (routes 저장에도 필요)
     ({ data, error } = await sb.from("users").upsert({ id: user.id, email: user.email, link_code: newCode() })
-      .select("telegram_chat_id, link_code").single());
+      .select("telegram_chat_id, link_code, api_token").single());
     if (error) throw error;
   } else if (!data.telegram_chat_id && !data.link_code) {
     const code = newCode();
@@ -1012,9 +1067,11 @@ async function loadTelegram(manual) {
   catch (e) {
     $("tgBody").innerHTML = `<div class="group"><div class="cell"><span class="grow sub">상태를 못 불러왔어요: ${esc(e.message)}</span>
       <button id="tgRefresh" class="tbtn" onclick="loadTelegram(true)">다시 시도</button></div></div>`;
+    if (apiToken === undefined) $("autoBody").innerHTML = `<div class="group"><div class="cell sub">토큰을 못 불러왔어요. 위 다시 시도를 눌러 주세요.</div></div>`;
     return;
   }
   tgLinked = !!p.telegram_chat_id; renderHome();
+  if (!reissuing) { apiToken = p.api_token || null; renderAuto(); }
   const checked = `<span class="cap">${hhmm(new Date())} 확인</span>`;
   if (tgLinked) {
     $("tgBody").innerHTML = `<div class="group"><div class="cell"><div class="grow">연결됨 <span class="accent">✓</span> ${checked}</div>
