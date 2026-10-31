@@ -178,6 +178,23 @@
   .legend i { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--accent); margin-right:5px; vertical-align:0 }
   .legend i.off { background:none; border:1.5px solid var(--accent); box-sizing:border-box }
   .legend i.base { width:16px; height:0; border-radius:0; background:none; border-top:1.5px dashed var(--label2); vertical-align:3px }
+  /* 구간 수정 모달 */
+  .modal { position:fixed; inset:0; z-index:36; background:var(--bg); overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; transition:transform .4s cubic-bezier(.32,.72,0,1) }
+  .modal.enter, .modal.leave { transform:translateY(100%) }
+  .modal .pnav { background:var(--bar); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px); border-bottom-color:var(--sep) }
+  .modal .pnav span { opacity:1 }
+  .navbtn { position:absolute; bottom:0; height:44px; padding:0 16px; border:0; background:none; color:var(--accent); font-size:17px }
+  .navbtn.l { left:max(0px, env(safe-area-inset-left)) } .navbtn.r { right:max(0px, env(safe-area-inset-right)); font-weight:600 }
+  .navbtn:active { opacity:.4 } .navbtn:disabled { opacity:.35 }
+  .seghead { display:flex; align-items:center; gap:6px; margin:22px 0 4px 16px; font-size:13px; color:var(--label2) }
+  .seghead .grow { display:flex; align-items:center; gap:6px }
+  .seghead .iconbtn { min-width:40px } .seghead .iconbtn:disabled { color:var(--label3) }
+  .segctl.k4 { grid-template-columns:repeat(4, 1fr); width:100% } .segctl.k4 button { min-height:36px }
+  .fcell { gap:10px } .fcell > span { flex:0 0 auto; min-width:84px }
+  .group .fcell input { flex:1; min-width:0; padding:0; min-height:44px; text-align:right }
+  .fcell select.inline { max-width:none; flex:1 }
+  .fcell input[type=number] { -moz-appearance:textfield; appearance:textfield }
+  .fcell input::-webkit-inner-spin-button, .fcell input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0 }
   .rtime { font-variant-numeric:tabular-nums } .rtime b { margin-left:6px }
   .tag { font-size:11px; color:var(--label2); border:.5px solid var(--sep); border-radius:5px; padding:0 5px; margin-left:6px; vertical-align:2px; white-space:nowrap }
   /* iOS 스위치 */
@@ -288,22 +305,6 @@
       </div>
       <div id="routeOptions"></div>
 
-      <details class="card" id="manualBox" style="padding:0 16px">
-        <summary class="disclose">직접 입력 · 구간 추가·삭제 <svg class="chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></summary>
-        <div class="col" style="padding-bottom:16px">
-          <select id="mRoute" onchange="renderManualSegs()" aria-label="구간을 고칠 경로"></select>
-          <div id="mSegs"></div>
-          <select id="sKind" aria-label="구간 종류">
-            <option value="walk">도보</option><option value="subway">지하철</option>
-            <option value="transfer">환승 도보</option><option value="bus">버스</option>
-          </select>
-          <div class="pair"><input id="sFrom" placeholder="출발 (역·정류장 번호)"><input id="sTo" placeholder="도착 (역·정류장 번호)"></div>
-          <div class="pair"><input id="sLine" placeholder="노선 (예: 4호선)"><input id="sUpdn" placeholder="방향 (상행·하행)"></div>
-          <div class="pair"><input id="sDist" type="number" inputmode="numeric" placeholder="도보 거리 m"><input id="sMin" type="number" inputmode="numeric" placeholder="예상 분"></div>
-          <div class="cap">도보는 거리만 넣으면 3.7 km/h로 분을 계산해요. 버스는 정류장 번호 5자리(예: 11211)를 넣으면 실시간을 정확히 찾아요.</div>
-          <button class="btn filled" onclick="addSegment()">구간 추가</button>
-        </div>
-      </details>
     </section>
 
     <!-- 기록 -->
@@ -341,6 +342,21 @@
       <div class="card chartcard"><div id="rdChart"></div><div class="legend" id="rdLegend"></div></div>
       <div class="gfoot" id="rdNote" style="margin-top:-8px"></div>
       <div id="rdList"></div>
+    </div>
+  </div>
+
+  <!-- 구간 수정: 아래에서 올라오는 모달 (탭바 위) -->
+  <div id="segModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="segTitle">
+    <header class="pnav">
+      <button class="navbtn l" onclick="segCancel()">취소</button>
+      <span id="segTitle">구간 수정</span>
+      <button class="navbtn r" id="segSaveBtn" onclick="segSave()">저장</button>
+    </header>
+    <div class="pwrap" style="padding-bottom:calc(40px + env(safe-area-inset-bottom))">
+      <div class="gfoot" id="segRoute" style="margin:14px 16px 0;font-size:15px"></div>
+      <div id="segList"></div>
+      <button class="btn" style="margin-top:24px" onclick="segAdd()">＋ 구간 추가</button>
+      <div class="gfoot">도보는 거리만 넣으면 3.7 km/h로 분을 계산해요. 버스 정류장 번호 5자리(예: 11211)가 있으면 실시간 도착을 정확히 찾아요. 지하철 방향을 '자동'으로 두면 알림이 방면을 보고 골라요.</div>
     </div>
   </div>
 
@@ -497,7 +513,7 @@ async function render() {
   document.body.classList.toggle("authed", !!user);   // 설치 안내를 탭바 위로 올린다
   $("auth").classList.toggle("hidden", !!user);
   $("app").classList.toggle("hidden", !user);
-  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; closeMenu(); closeRec(false); return; }
+  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; closeMenu(); closeRec(false); if (segEdit) hideSegEdit(); return; }
   showTab(); lastSync = Date.now();
   await Promise.all([loadTelegram(), loadAll()]);
 }
@@ -541,7 +557,7 @@ async function reloadTrips() {
   if (!ts.error) tripsAll = ts.data || [];
   renderAll();
 }
-function renderAll() { renderHome(); renderRecords(); renderSettings(); renderManual(); }
+function renderAll() { renderHome(); renderRecords(); renderSettings(); }
 
 const routeById = id => routes.find(r => r.id === id);
 const segsOf = r => segsBy[r.id] || [];
@@ -632,7 +648,7 @@ function routeCard(r) {
       <button class="iconbtn" aria-label="${esc(r.name)} 메뉴" onclick="openMenu(${r.id})"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.3"/><circle cx="7.9" cy="12" r=".8" fill="currentColor"/><circle cx="12" cy="12" r=".8" fill="currentColor"/><circle cx="16.1" cy="12" r=".8" fill="currentColor"/></svg></button></div>
     <div class="rc-time"><span class="lbl">출발</span><span class="big">${hhmm(depart)}</span>${when ? `<span class="pill${open || left > 0 && left <= 30 ? " now" : ""}">${when}</span>` : ""}</div>
     <div class="sub">도착 목표 ${r.arrive_by.slice(0,5)} · 예상 ${needMin}분 · ${basis}</div>
-    ${parts.length ? barHtml(parts) + legsHtml(parts) : `<div class="cap" style="margin-top:12px">구간이 없어요. 길찾기 › 직접 입력에서 추가해요.</div>`}
+    ${parts.length ? barHtml(parts) + legsHtml(parts) : `<div class="cap" style="margin-top:12px">구간이 없어요. ··· › 구간 수정에서 추가해요.</div>`}
     ${progressHtml(r, open || done)}
     <button class="btn ${cls} cta" ${busyId !== null || done ? "disabled" : ""} onclick="cta(${r.id})">${label}</button>
     ${segs.length ? `<details id="d-rc-${r.id}" ${isOpen("d-rc-" + r.id)} ontoggle="keepOpen(this)"><summary class="disclose">역·정류장 상세 ${CHEV}</summary>${segRail(r)}</details>` : ""}
@@ -715,13 +731,13 @@ function openMenu(id) {
     if (st[0] !== "ended_at") items.push(["바로 도착", `markField(${id},'ended_at')`]);
     items.push(["진행 중 기록 삭제", `cancelTrip(${id})`, true]);
   } else if (done) { msg = "오늘 기록 완료"; items.push(["새 기록 시작", `markField(${id},'started_at')`]); }
-  items.push(["알림 시간·신뢰 수준", "setTab('settings')"], ["경로 삭제", `deleteRoute(${id})`, true]);
+  items.push(["구간 수정", `openSegEdit(${id})`], ["알림 시간·신뢰 수준", "setTab('settings')"], ["경로 삭제", `deleteRoute(${id})`, true]);
   $("sheetTitle").textContent = r.name; $("sheetMsg").textContent = msg;
   $("sheetBody").innerHTML = items.map(([t, fn, bad]) => `<button class="act${bad ? " danger" : ""}" onclick="closeMenu();${fn}">${t}</button>`).join("");
   $("sheet").classList.remove("hidden"); $("sheetBg").classList.remove("hidden");
 }
 function closeMenu() { $("sheet").classList.add("hidden"); $("sheetBg").classList.add("hidden"); }
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
+document.addEventListener("keydown", e => { if (e.key !== "Escape") return; if (segEdit) segCancel(); else closeMenu(); });
 
 // ---------- 길찾기 ----------
 function renderDays() {
@@ -948,35 +964,134 @@ function segmentRows(r, routeId) {
       distance_m: st.distance || null, expected_sec: Math.round((kind === "walk" || kind === "transfer") ? walkSec : st.time) };
   });
 }
-// 직접 입력
-function renderManual() {
-  const cur = $("mRoute").value;
-  $("mRoute").innerHTML = routes.length ? routes.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join("") : `<option value="">저장된 경로가 없어요</option>`;
-  if (routes.some(r => String(r.id) === cur)) $("mRoute").value = cur;
-  renderManualSegs();
+// ---------- 구간 수정 (홈 ··· 메뉴) ----------
+// 저장된 경로의 segments를 고친다: 종류·역/정류장·노선·방향·거리/분, 삭제, 순서. 저장 = 지운 것 delete, 있던 것 update, 새것 insert
+const SEG_KINDS = [["walk", "도보"], ["subway", "지하철"], ["bus", "버스"], ["transfer", "환승"]];
+const UPDNS = [["", "자동"], ["상행", "상행"], ["하행", "하행"], ["내선", "내선"], ["외선", "외선"]];
+let segEdit = null, segT;   // { routeId, rows:[초안], origIds, dirty, saving, closing }
+const walkish = k => k === "walk" || k === "transfer";
+function segDraft(s) {
+  const d = { id: s.id, kind: s.kind, from: s.station_from || "", to: s.station_to || "", line: s.line || "", updn: s.updn || "",
+    fromNo: "", toNo: "", dist: s.distance_m != null ? String(s.distance_m) : "", min: s.expected_sec != null ? String(Math.round(s.expected_sec / 60)) : "", sec: s.expected_sec ?? null };
+  if (s.kind === "bus") {   // 저장 형식: station_from/to = 정류장 번호(없으면 이름), line = '1142 (승차 이름→하차 이름)'
+    const m = /^(.*?)\s*\((.*)→(.*)\)$/.exec(s.line || ""), clean = v => (v || "").trim() === "?" ? "" : (v || "").trim();
+    d.fromNo = isArs(s.station_from) ? s.station_from : ""; d.toNo = isArs(s.station_to) ? s.station_to : "";
+    if (m) { d.line = m[1].trim(); d.from = clean(m[2]); d.to = clean(m[3]); }
+    if (d.fromNo && d.from === d.fromNo) d.from = ""; if (d.toNo && d.to === d.toNo) d.to = "";
+  }
+  d.min0 = d.min; d.dist0 = d.dist;
+  return d;
 }
-function renderManualSegs() {
-  const r = routeById(Number($("mRoute").value));
-  $("mSegs").innerHTML = !r ? "" : `<div class="group" style="background:var(--fill)">${segsOf(r).map(s => {
-      const p = partOf(s.kind, s.expected_sec, s.line), pl = segPlaces(s);
-      return `<div class="cell" style="padding:6px 4px 6px 12px;font-size:15px"><div class="grow">${p.color ? chip(p) : `<b>${p.name}</b>`} ${pl.from || ""} → ${pl.to || ""}
-        <span class="cap">· ${p.min}분${s.distance_m ? ` · ${s.distance_m}m` : ""}</span></div>
-        <button class="iconbtn danger" aria-label="구간 삭제" onclick="delSegment(${s.id})"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.3"/><path d="M8 12h8"/></svg></button></div>`; }).join("")
-      || `<div class="cell cap">구간이 없어요.</div>`}</div>`;
+function segRow(d, i) {   // 초안 → segments 행
+  const t = v => String(v ?? "").trim() || null, k = d.kind, dist = Number(d.dist) > 0 ? Math.round(Number(d.dist)) : null;
+  const row = { seq: i + 1, kind: k, updn: k === "subway" ? t(d.updn) : null, distance_m: dist };
+  if (k === "bus") {
+    const no = t(d.line), fn = t(d.from), tn = t(d.to);
+    row.line = no ? (fn || tn ? `${no} (${fn || "?"}→${tn || "?"})` : no) : null;
+    row.station_from = isArs(t(d.fromNo)) ? t(d.fromNo) : fn; row.station_to = isArs(t(d.toNo)) ? t(d.toNo) : tn;
+  } else {
+    row.station_from = t(d.from); row.station_to = t(d.to); row.line = k === "subway" ? t(d.line) : null;
+  }
+  const byDist = walkish(k) && dist ? Math.round(dist / 1000 / WALK_KMH * 3600) : null;   // 네이버와 같은 3.7 km/h
+  const minChanged = String(d.min).trim() !== d.min0, distChanged = String(d.dist).trim() !== d.dist0;
+  if (minChanged) row.expected_sec = Number(d.min) > 0 ? Math.round(Number(d.min) * 60) : byDist;
+  else if (distChanged && byDist) row.expected_sec = byDist;
+  else row.expected_sec = d.sec ?? byDist;
+  return row;
 }
-async function addSegment() {
-  const r = routeById(Number($("mRoute").value)); if (!r) return alert("먼저 길찾기로 경로를 저장해요.");
-  const kind = $("sKind").value, dist = Number($("sDist").value) || null; let min = Number($("sMin").value) || null;
-  if ((kind === "walk" || kind === "transfer") && dist && !min) min = Math.round(dist / 1000 / WALK_KMH * 60);   // 네이버와 같은 3.7 km/h 기준
-  const { error } = await sb.from("segments").insert({ route_id: r.id, seq: segsOf(r).length + 1, kind,
-    station_from: $("sFrom").value || null, station_to: $("sTo").value || null, line: $("sLine").value || null,
-    updn: $("sUpdn").value || null, distance_m: dist, expected_sec: min ? min * 60 : null });
-  if (error) return alert(error.message);
-  ["sFrom","sTo","sLine","sUpdn","sDist","sMin"].forEach(i => $(i).value = ""); toast("구간을 추가했어요"); await loadAll();
+function segHeadChip(d, i) { const p = partOf(d.kind, 0, segRow(d, i).line); return p.color ? chip(p) : `<b>${p.name}</b>`; }
+function openSegEdit(id) {
+  const r = routeById(id); if (!r) return;
+  segEdit = { routeId: id, rows: segsOf(r).map(segDraft), origIds: segsOf(r).map(s => s.id), dirty: false, saving: false };
+  $("segRoute").textContent = r.name;
+  renderSegEdit();
+  const m = $("segModal"); clearTimeout(segT);
+  m.classList.remove("leave"); if (!reduceMotion()) m.classList.add("enter");
+  m.classList.remove("hidden"); m.scrollTop = 0;
+  if (!reduceMotion()) { void m.offsetWidth; m.classList.remove("enter"); }
+  try { history.pushState({ seg: id }, "", location.href); } catch {}   // 안드로이드 뒤로가기 = 취소
 }
-async function delSegment(id) {
-  if (!confirm("이 구간을 지울까요?")) return;
-  await sb.from("segments").delete().eq("id", id); await loadAll();
+function renderSegEdit() {
+  const rows = segEdit.rows, field = (i, f, label, ph, extra = "") =>
+    `<label class="cell fcell"><span>${label}</span><input value="${esc(rows[i][f])}" placeholder="${ph}" oninput="segSet(${i},'${f}',this.value)" ${extra}></label>`;
+  $("segList").innerHTML = rows.map((d, i) => {
+    const k = d.kind, num = `type="number" inputmode="numeric" min="0"`;
+    let f = "";
+    if (k === "subway") f = field(i, "from", "승차역", "예: 노원") + field(i, "to", "하차역", "예: 동대문역사문화공원") + field(i, "line", "노선", "예: 4호선")
+      + `<label class="cell fcell"><span>방향</span><select class="inline" onchange="segSet(${i},'updn',this.value)">${
+          [...UPDNS, ...(d.updn && !UPDNS.some(([v]) => v === d.updn) ? [[d.updn, d.updn]] : [])].map(([v, n]) => `<option value="${esc(v)}" ${v === d.updn ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>`;
+    else if (k === "bus") f = field(i, "line", "노선", "예: 1142") + field(i, "from", "승차 정류장", "이름") + field(i, "fromNo", "승차 번호", "5자리 (예: 11211)", `inputmode="numeric" maxlength="5"`)
+      + field(i, "to", "하차 정류장", "이름") + field(i, "toNo", "하차 번호", "5자리", `inputmode="numeric" maxlength="5"`);
+    else f = field(i, "from", "출발", "선택") + field(i, "to", "도착", "선택") + field(i, "dist", "거리 (m)", "예: 300", num);
+    f += field(i, "min", "예상 (분)", walkish(k) ? "거리로 계산" : "예: 25", num);
+    return `<div class="seghead"><span class="grow">구간 ${i + 1} <span id="segchip-${i}">${segHeadChip(d, i)}</span></span>
+        <button class="iconbtn" ${i ? "" : "disabled"} aria-label="구간 ${i + 1} 위로" onclick="segMove(${i},-1)"><svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
+        <button class="iconbtn" ${i < rows.length - 1 ? "" : "disabled"} aria-label="구간 ${i + 1} 아래로" onclick="segMove(${i},1)"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+        <button class="iconbtn danger" aria-label="구간 ${i + 1} 삭제" onclick="segDel(${i})"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.3"/><path d="M8 12h8"/></svg></button></div>
+      <div class="group">
+        <div class="cell" style="padding:8px 12px"><div class="segctl k4" role="group" aria-label="구간 ${i + 1} 종류">${SEG_KINDS.map(([v, n]) =>
+          `<button type="button" aria-pressed="${k === v}" onclick="segSet(${i},'kind','${v}')">${n}</button>`).join("")}</div></div>
+        ${f}
+      </div>`;
+  }).join("") || `<div class="card empty" style="margin-top:16px"><b>구간이 없어요</b><div class="sub">아래 ＋ 구간 추가로 집 → 역 → … → 목적지 순서대로 넣어요.</div></div>`;
+}
+function segSet(i, f, v) {
+  const d = segEdit.rows[i]; if (!d || d[f] === v) return;
+  d[f] = v; segEdit.dirty = true;
+  if (f === "kind") return renderSegEdit();   // 종류가 바뀌면 칸 구성이 달라진다
+  if (f === "line") { const el = $("segchip-" + i); if (el) el.innerHTML = segHeadChip(d, i); }
+}
+function segMove(i, dir) {
+  const rows = segEdit.rows, j = i + dir; if (j < 0 || j >= rows.length) return;
+  [rows[i], rows[j]] = [rows[j], rows[i]]; segEdit.dirty = true; renderSegEdit();
+}
+function segDel(i) { segEdit.rows.splice(i, 1); segEdit.dirty = true; renderSegEdit(); }
+function segAdd() {
+  const prev = segEdit.rows[segEdit.rows.length - 1], kind = !prev ? "walk" : walkish(prev.kind) ? "subway" : "walk";
+  segEdit.rows.push({ id: null, kind, from: "", to: "", line: "", updn: "", fromNo: "", toNo: "", dist: "", min: "", sec: null, min0: "", dist0: "" });
+  segEdit.dirty = true; renderSegEdit();
+  const heads = document.querySelectorAll("#segList .seghead"); heads[heads.length - 1]?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function segCancel() {
+  if (!segEdit || segEdit.saving) return;
+  if (segEdit.dirty && !confirm("고친 내용을 저장하지 않고 닫을까요?")) return;
+  segEdit.closing = true;
+  if (history.state?.seg) history.back(); else hideSegEdit();   // popstate가 닫는다
+}
+function hideSegEdit() {
+  const m = $("segModal"); segEdit = null; clearTimeout(segT);
+  const done = () => { m.classList.add("hidden"); m.classList.remove("leave"); };
+  if (reduceMotion()) done(); else { m.classList.add("leave"); segT = setTimeout(done, 400); }
+}
+addEventListener("popstate", () => {
+  if (!segEdit || history.state?.seg) return;
+  if (segEdit.dirty && !segEdit.closing && !confirm("고친 내용을 저장하지 않고 닫을까요?")) {
+    try { history.pushState({ seg: segEdit.routeId }, "", location.href); } catch {} return;
+  }
+  hideSegEdit();
+});
+async function segSave() {
+  if (!segEdit || segEdit.saving) return;
+  const ed = segEdit, r = routeById(ed.routeId);
+  if (!r) { alert("경로가 없어요. 이미 지워졌을 수 있어요."); return segCancel(); }
+  const bad = ed.rows.findIndex(d => d.kind === "bus" && [d.fromNo, d.toNo].some(v => String(v).trim() && !isArs(String(v).trim())));
+  if (bad >= 0) return alert(`구간 ${bad + 1}: 정류장 번호는 5자리 숫자예요 (예: 11211). 모르면 비워 두세요.`);
+  if (!ed.dirty) return segCancel();
+  ed.saving = true; $("segSaveBtn").disabled = true; $("segSaveBtn").textContent = "저장 중…";
+  const rows = ed.rows.map((d, i) => ({ id: d.id, row: segRow(d, i) }));
+  const keep = new Set(rows.filter(x => x.id).map(x => x.id)), gone = ed.origIds.filter(id => !keep.has(id));
+  const errs = [];
+  const note = ({ error }) => { if (error) errs.push(error.message); };
+  if (gone.length) note(await sb.from("segments").delete().in("id", gone));
+  (await Promise.all(rows.filter(x => x.id).map(x => sb.from("segments").update(x.row).eq("id", x.id)))).forEach(note);
+  const fresh = rows.filter(x => !x.id).map(x => ({ route_id: r.id, ...x.row }));
+  if (fresh.length) note(await sb.from("segments").insert(fresh));
+  ed.saving = false; $("segSaveBtn").disabled = false; $("segSaveBtn").textContent = "저장";
+  ed.closing = true; ed.dirty = false;   // 실패해도 닫고 DB에서 다시 읽는다 (초안을 다시 저장하면 새 구간이 두 번 들어갈 수 있어서)
+  if (history.state?.seg) history.back(); else hideSegEdit();
+  await loadAll();
+  if (errs.length) alert("일부를 저장하지 못했어요: " + errs[0] + "\n··· › 구간 수정을 다시 열어 확인해 주세요.");
+  else toast("구간을 저장했어요");
 }
 
 // ---------- 기록 ----------
