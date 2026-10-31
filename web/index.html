@@ -151,7 +151,8 @@
             <div class="pair"><input id="sFrom" placeholder="출발 (역/장소)"><input id="sTo" placeholder="도착 (역/장소)"></div>
             <div class="pair"><input id="sLine" placeholder="노선 (예: 4호선)"><input id="sUpdn" placeholder="방향 (상행/하행)"></div>
             <div class="pair"><input id="sDist" type="number" inputmode="numeric" placeholder="도보 거리 m"><input id="sMin" type="number" inputmode="numeric" placeholder="예상 분"></div>
-            <div class="muted">도보는 거리만 넣으면 3.7 km/h로 분을 계산해요. 네이버와 같은 기준에서 시작해 내 기록으로 바뀝니다.</div>
+            <div class="muted">도보는 거리만 넣으면 3.7 km/h로 분을 계산해요. 네이버와 같은 기준에서 시작해 내 기록으로 바뀝니다.
+              버스는 출발에 정류장 번호 5자리를 같이 적으면(예: 노원역1번출구 11211) 실시간을 정확히 찾아요.</div>
             <button class="primary" onclick="addSegment()">구간 추가</button>
           </div>
         </details>
@@ -287,6 +288,12 @@ const daysStr = () => newDays.map((on, i) => on ? DAY_EN[i] : "-").join("");
 
 const KSTEP = { WALKING:["walk","도보"], SUBWAY:["subway","지하철"], BUS:["bus","버스"] };
 let found = null;
+// 버스 정류장은 "이름 번호" 한 칸에 적는다 (예: "노원역1번출구 11211"). 번호는 실시간 조회용, 이름은 표시용.
+const withArs = (name, ars) => /^\d{5}$/.test(ars || "") ? (name ? `${name} ${ars}` : ars) : name;
+const stopHtml = s => {   // 끝의 5자리 번호를 흐리게 (lookbehind는 옛 iOS Safari에서 문법 오류라 안 씀)
+  const m = /^(.*?)\s*(\d{5})\s*$/.exec(s || "");
+  return m && !/\d$/.test(m[1]) ? `${esc(m[1] || "정류장")} <span class="muted">${m[2]}</span>` : esc(s);
+};
 async function findRoutes() {
   const from = $("rFrom").value.trim(), to = $("rTo").value.trim();
   if (!from || !to) { $("findMsg").textContent = "출발과 도착을 입력해요."; return; }
@@ -301,11 +308,11 @@ async function findRoutes() {
   }
   found = data;
   $("findMsg").textContent = `${data.from.name} → ${data.to.name} · 경로 ${data.routes.length}개`;
-  // TODO: 카카오 time 단위(초/분)는 route 배포 후 첫 응답에서 확인. 지금은 초로 가정.
+  // 단위: time/totalTime은 초, distance는 m (route 함수가 실제 응답으로 확인)
   $("routeOptions").innerHTML = data.routes.slice(0, 6).map((r, i) => {
     const bar = r.steps.map(st => `<div style="flex:${st.time||1};background:var(--${KSTEP[st.type]?.[0]||"walk"})"></div>`).join("");
     const steps = r.steps.map(st => st.type === "WALKING" ? `도보 ${Math.round(st.time/60)}분`
-        : `${esc(st.line || KSTEP[st.type]?.[1] || "")} ${esc(st.from || "")}→${esc(st.to || "")} ${Math.round(st.time/60)}분`).join(" · ");
+        : `${esc(st.line || KSTEP[st.type]?.[1] || "")} ${stopHtml(withArs(st.from, st.arsId) || "")}→${stopHtml(withArs(st.to, st.arsIdTo) || "")} ${Math.round(st.time/60)}분`).join(" · ");
     return `<div class="opt">
       <div class="row between"><b>${Math.round(r.totalTime/60)}분</b><span class="muted">환승 ${r.transfers} · ${r.fare?.toLocaleString?.() || r.fare || ""}원</span></div>
       <div class="bar">${bar}</div><div class="muted" style="font-size:13px">${steps}</div>
@@ -319,24 +326,29 @@ async function saveRoute(i) {
     name: `${found.from.name} → ${found.to.name}`, arrive_by: $("rArrive").value || "09:00",
     active_days: daysStr(), baseline_sec: Math.round(r.totalTime) }).select().single();
   if (error) return alert(error.message);
+  const { error: e2 } = await sb.from("segments").insert(segmentRows(r, route.id));
+  if (e2) return alert(e2.message);
+  $("newRoute").classList.add("hidden"); $("routeOptions").innerHTML = ""; $("findMsg").textContent = "";
+  $("rFrom").value = $("rTo").value = "";
+  current = route; await loadRoutes();
+  $("routeView").scrollIntoView({ behavior:"smooth", block:"start" });
+}
+// 카카오 경로 하나 → segments 행들
+function segmentRows(r, routeId) {
   const rows = []; let prevTransit = false;
   r.steps.forEach((st, idx) => {
     let kind = KSTEP[st.type]?.[0] || "walk";
     const nextTransit = r.steps[idx+1] && r.steps[idx+1].type !== "WALKING";
     if (kind === "walk" && prevTransit && nextTransit) kind = "transfer";   // 교통수단 사이의 도보 = 환승
     const walkSec = st.distance ? Math.round(st.distance / 1000 / WALK_KMH * 3600) : st.time;  // 도보는 3.7km/h 기준에서 시작
-    rows.push({ route_id: route.id, seq: idx+1, kind,
-      station_from: st.from || (idx === 0 ? found.from.name : null), station_to: st.to || (idx === r.steps.length-1 ? found.to.name : null),
-      line: st.line, updn: null, distance_m: st.distance || null,
+    let sFrom = st.from || (idx === 0 ? found.from.name : null), sTo = st.to || (idx === r.steps.length-1 ? found.to.name : null);
+    if (kind === "bus") { sFrom = withArs(sFrom, st.arsId); sTo = withArs(sTo, st.arsIdTo); }   // watch.py는 station_from의 5자리 번호로 실시간 조회
+    rows.push({ route_id: routeId, seq: idx+1, kind, station_from: sFrom, station_to: sTo,
+      line: st.line ?? null, updn: null, distance_m: st.distance || null,
       expected_sec: Math.round((kind === "walk" || kind === "transfer") ? walkSec : st.time) });
     prevTransit = st.type !== "WALKING";
   });
-  const { error: e2 } = await sb.from("segments").insert(rows);
-  if (e2) return alert(e2.message);
-  $("newRoute").classList.add("hidden"); $("routeOptions").innerHTML = ""; $("findMsg").textContent = "";
-  $("rFrom").value = $("rTo").value = "";
-  current = route; await loadRoutes();
-  $("routeView").scrollIntoView({ behavior:"smooth", block:"start" });
+  return rows;
 }
 async function selectRoute(id) {
   current = routes.find(r => r.id === id); if (!current) return;
@@ -374,7 +386,7 @@ function renderRoute() {
   $("rvBar").innerHTML = segments.map(s=>`<div style="flex:${s.expected_sec||1};background:var(${KIND[s.kind]?.[1]||"--walk"})"></div>`).join("");
   $("rvLegend").innerHTML = Object.entries(KIND).map(([k,[n,c]])=>`<span><i class="dot" style="background:var(${c})"></i>${n}</span>`).join("");
   $("rvSegs").innerHTML = segments.map(s=>`<div class="seg"><i class="dot" style="background:var(${KIND[s.kind]?.[1]||"--walk"})"></i>
-    <div><b>${KIND[s.kind]?.[0]||esc(s.kind)}</b> ${esc(s.station_from)} → ${esc(s.station_to)} ${s.line?`· ${esc(s.line)} ${esc(s.updn)}`:""}
+    <div><b>${KIND[s.kind]?.[0]||esc(s.kind)}</b> ${stopHtml(s.station_from)} → ${stopHtml(s.station_to)} ${s.line?`· ${esc(s.line)} ${esc(s.updn)}`:""}
     <span class="muted">· ${Math.round((s.expected_sec||0)/60)}분${s.distance_m?` (${s.distance_m}m)`:""}</span></div>
     <button class="icon" aria-label="구간 삭제" onclick="delSegment(${s.id})">✕</button></div>`).join("")
     || `<div class="muted">구간을 추가하면 네이버처럼 막대가 생겨요.</div>`;
