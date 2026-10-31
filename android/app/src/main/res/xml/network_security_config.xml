@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Seoul real-time subway API only answers over plain HTTP (HTTPS times out), and Android blocks
+  cleartext traffic by default. Allow it for that single host only; everything else stays HTTPS-only.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">swopenapi.seoul.go.kr</domain>
+    </domain-config>
+</network-security-config>
