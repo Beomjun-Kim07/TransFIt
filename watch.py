@@ -77,10 +77,32 @@ def sb_get(table, params):
     return r.json()
 
 def sb_insert_ignore(table, row, on_conflict):
-    h = dict(H, Prefer="resolution=ignore-duplicates,return=minimal")
+    """행을 넣고, 유니크 충돌이면 조용히 무시한다. → 이번에 새로 들어간 행 목록 (충돌이면 []).
+    PostgREST가 INSERT … ON CONFLICT DO NOTHING RETURNING 으로 실행해 새로 들어간 행만 돌려준다."""
+    h = dict(H, Prefer="resolution=ignore-duplicates,return=representation")
     r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=h,
                       params={"on_conflict": on_conflict}, data=json.dumps(row), timeout=15)
     r.raise_for_status()
+    return r.json()
+
+def sb_delete(table, params):
+    r = requests.delete(f"{SUPABASE_URL}/rest/v1/{table}", headers=H, params=params, timeout=15)
+    r.raise_for_status()
+
+def notify_once(route, day, kind, send_fn):
+    """오늘 이 경로의 kind 알림을 한 번만 보낸다. → True 보냄 / False 이미 보냄(다른 실행이 먼저).
+    notifications 유니크(route_id, date, kind)에 행을 넣는 데 성공한 실행만 보낸다 — 거의 동시에 두 실행이 와도 한쪽만.
+    보내다 실패하면 그 행을 지워 다음 실행(10분 뒤)이 다시 시도하게 한다."""
+    rows = sb_insert_ignore("notifications", {"user_id": route["user_id"], "route_id": route["id"],
+                                              "date": day.isoformat(), "kind": kind}, "route_id,date,kind")
+    if not rows:
+        return False
+    try:
+        send_fn()
+    except Exception:
+        sb_delete("notifications", {"id": f"eq.{rows[0]['id']}"})
+        raise
+    return True
 
 def fetch_trips(route_id, since):
     """최근 기록. excluded 컬럼이 아직 DB에 없으면(400, 42703) 그 컬럼 없이 다시 조회해 알림이 멈추지 않게 한다."""
@@ -675,27 +697,20 @@ def main():
         # 알림 1: 출발 lead_min 전 구간
         if depart - timedelta(minutes=lead) <= now < depart:
             try:
-                sb_insert_ignore("notifications", {"user_id": route["user_id"], "route_id": route["id"],
-                                                   "date": today.isoformat(), "kind": "pre"}, "route_id,date,kind")
-                already = sb_get("notifications", {"route_id": f"eq.{route['id']}", "date": f"eq.{today}", "kind": "eq.pre", "select": "sent_at"})
-                # ignore-duplicates라 새로 들어갔는지 알 수 없어 sent_at으로 판정: 방금 생긴 행이면 보낸다
-                sent_at = parse_ts(already[0]["sent_at"])
-                if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
-                    send_pre(chat_id, route["id"], pre_msg)
+                if notify_once(route, today, "pre", lambda: send_pre(chat_id, route["id"], pre_msg)):
                     print("    pre 발송 (출발했어요 버튼)")
+                else:
+                    print("    pre 이미 보냄 (오늘 notifications에 있음) — 건너뜀")
             except Exception as e:
                 print("    pre 실패:", redact(e))
 
-        # 알림 2: 출발 시각 ±LIVE_WINDOW_MIN, 실시간 보정
+        # 알림 2: 출발 시각 ±LIVE_WINDOW_MIN, 실시간 보정 (실시간 조회는 보낼 차례일 때만)
         if depart - timedelta(minutes=LIVE_WINDOW_MIN) <= now <= depart + timedelta(minutes=LIVE_WINDOW_MIN):
             try:
-                sb_insert_ignore("notifications", {"user_id": route["user_id"], "route_id": route["id"],
-                                                   "date": today.isoformat(), "kind": "live"}, "route_id,date,kind")
-                already = sb_get("notifications", {"route_id": f"eq.{route['id']}", "date": f"eq.{today}", "kind": "eq.live", "select": "sent_at"})
-                sent_at = parse_ts(already[0]["sent_at"])
-                if (datetime.now(timezone.utc) - sent_at).total_seconds() < 120:
-                    send_live(chat_id, live_text(live_lines(segments, now)))
+                if notify_once(route, today, "live", lambda: send_live(chat_id, live_text(live_lines(segments, now)))):
                     print("    live 발송")
+                else:
+                    print("    live 이미 보냄 (오늘 notifications에 있음) — 건너뜀")
             except Exception as e:
                 print("    live 실패:", redact(e))
 

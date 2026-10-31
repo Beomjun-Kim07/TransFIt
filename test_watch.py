@@ -88,6 +88,76 @@ ok(pre["text"] == "\n".join(txt), "pre 본문 그대로")
 ok("reply_markup" not in live and live["text"].startswith("🚇 지금 출발하면"), "live 알림엔 버튼 없음")
 ok(len(f"trip:start:{2**31 - 1}".encode()) <= 64, "callback_data 64바이트 제한 안")
 
+print("== 중복 방지: notifications 행을 새로 넣은 실행만 보낸다 (가짜 DB)")
+db, deleted, calls = set(), [], []
+def fake_insert(table, row, on_conflict):
+    key = (row["route_id"], row["date"], row["kind"])
+    if key in db:
+        return []                                      # ON CONFLICT DO NOTHING RETURNING → 빈 목록
+    db.add(key); return [dict(row, id=len(db))]
+real_db = (w.sb_insert_ignore, w.sb_delete)
+w.sb_insert_ignore, w.sb_delete = fake_insert, (lambda t, p: (deleted.append(p), db.clear()))
+try:
+    r11, day = {"id": 11, "user_id": "u"}, now.date()
+    first_ = w.notify_once(r11, day, "pre", lambda: calls.append("pre1"))
+    second = w.notify_once(r11, day, "pre", lambda: calls.append("pre2"))     # 몇 초 뒤 두 번째 실행
+    live1 = w.notify_once(r11, day, "live", lambda: calls.append("live1"))
+    def boom(): raise RuntimeError("텔레그램 실패")
+    db.clear(); failed = None
+    try: w.notify_once(r11, day, "pre", boom)
+    except RuntimeError: failed = True
+    retry = w.notify_once(r11, day, "pre", lambda: calls.append("pre-retry"))
+finally:
+    w.sb_insert_ignore, w.sb_delete = real_db
+ok(first_ is True and second is False and calls[:2] == ["pre1", "live1"], "1차 pre 발송, 2차는 건너뜀 (120초 안이어도)")
+ok(live1 is True, "live는 종류가 달라 따로 한 번")
+ok(failed and deleted == [{"id": "eq.1"}] and retry is True and calls[-1] == "pre-retry", "보내기 실패하면 행을 지워 다음 실행이 다시 시도")
+
+# 동시에 두 번 (스레드 2개): DB 유니크처럼 원자적으로 동작하는 가짜 삽입
+import threading
+lock, db2, sent2 = threading.Lock(), set(), []
+def atomic_insert(table, row, on_conflict):
+    key = (row["route_id"], row["date"], row["kind"])
+    with lock:
+        if key in db2:
+            return []
+        db2.add(key)
+    return [dict(row, id=1)]
+w.sb_insert_ignore = atomic_insert
+try:
+    gate = threading.Barrier(2)
+    def run_once():
+        gate.wait()                                    # 두 스레드를 같은 순간에 출발
+        w.notify_once({"id": 11, "user_id": "u"}, now.date(), "pre", lambda: sent2.append(threading.get_ident()))
+    ths = [threading.Thread(target=run_once) for _ in range(2)]
+    [t.start() for t in ths]; [t.join() for t in ths]
+finally:
+    w.sb_insert_ignore, w.sb_delete = real_db
+ok(len(sent2) == 1, f"동시에 두 번(스레드 2개, 가짜 DB) → {len(sent2)}통")
+
+print("== 중복 방지: 실제 Supabase에서 동시에 두 번 (날짜 2000-01-01 시험 행, 끝나면 지움)")
+rts = w.sb_get("routes", {"select": "id,user_id", "limit": 1})
+if not rts:
+    print("  (경로가 없어 건너뜀)")
+else:
+    from datetime import date as _date
+    rt, fake_day, sent3 = rts[0], _date(2000, 1, 1), []
+    params = {"route_id": f"eq.{rt['id']}", "date": "eq.2000-01-01"}
+    w.sb_delete("notifications", params)
+    try:
+        gate = threading.Barrier(2)
+        def run_real():
+            gate.wait()
+            w.notify_once(rt, fake_day, "pre", lambda: sent3.append(1))
+        ths = [threading.Thread(target=run_real) for _ in range(2)]
+        [t.start() for t in ths]; [t.join() for t in ths]
+        again = w.notify_once(rt, fake_day, "pre", lambda: sent3.append(1))   # 이어서 세 번째
+        left = w.sb_get("notifications", dict(params, select="id,kind"))
+    finally:
+        w.sb_delete("notifications", params)
+    ok(len(sent3) == 1 and again is False and len(left) == 1, f"실제 DB 동시 2회 + 연달아 1회 → {len(sent3)}통, 행 {len(left)}개")
+    ok(not w.sb_get("notifications", dict(params, select="id")), "시험 행 정리됨")
+
 print("== 방향 판정 (가짜 데이터)")
 def tr(sid, upd, tln, cur, nxt, term, bar="120", no="1"):
     return dict(subwayId=sid, updnLine=upd, trainLineNm=tln, statnId=str(cur), statnTid=str(nxt), bstatnId=str(term),
