@@ -2,9 +2,9 @@
 // 실행: deno test --allow-net --allow-read --allow-env supabase/functions/_shared/realtime_test.ts
 // 앞부분은 가짜 데이터(네트워크 없음). '실제 API' 시험은 .env.local(또는 환경변수)에 SUBWAY_KEY·BUS_KEY가 있을 때만 돌고, 키는 출력하지 않는다.
 import {
-  boardingVehicle, busEta, busLabel, busStopIds, type ChainItem, dropShortTurn, type Env, idDist, isRough, lineId, lineLabel, liveChain,
-  liveForSegment, liveLineText, liveText, normStation, pickBusStop, pickDirection, redact, rideEta, routeMatch, sameStation,
-  type Seg, SEC_PER_STATION, stopName, subwayEta, timedTrains,
+  boardingVehicle, busEta, busLabel, busStopIds, type ChainItem, dropShortTurn, type Env, firstWalkSec, idDist, isRough, lineId, lineLabel, liveChain,
+  liveForSegment, liveLineText, liveText, normStation, personalWalkSec, pickBusStop, pickDirection, redact, rideEta, routeMatch, sameStation,
+  type Seg, SEC_PER_STATION, stopName, subwayEta, timedTrains, type TripRow,
 } from "./realtime.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -189,6 +189,43 @@ Deno.test("liveChain: fromIndex·walkSec — 이동 중 (노원역까지 2분 �
   const items: ChainItem[] = await liveChain(ROUTE5, 2, 120, fakeEnv(fakeFetch({ 노원: NOWON_CHAIN, 선바위: SEONBAWI })));
   eq(items.map((i) => [i.index, i.waits, i.readyInSec, i.chain]), [[2, [780, 1230], 120, "역까지 도보 2분 = 노원역 2분 뒤"]]);
   eq(await liveChain([{ kind: "walk", expected_sec: 600 }], 0, 0, fakeEnv(fakeFetch({}))), [], "탈 구간 없으면 빈 목록");
+});
+
+// ---------- 개인 첫 도보 (test_watch.py와 같은 케이스) ----------
+const wt = (minutes: number, daysAgo = 1, excluded?: boolean, platform = true): TripRow => {
+  const st = now.getTime() - daysAgo * 86400e3;
+  return { started_at: new Date(st).toISOString(), platform_at: platform ? new Date(st + minutes * 60e3).toISOString() : null,
+           ...(excluded === undefined ? {} : { excluded }) };
+};
+const NOISE = [wt(9, 1, true), wt(4, 61), wt(45), wt(0.5), wt(6, 1, undefined, false)];
+const WALK_SUB: Seg[] = [{ kind: "walk", expected_sec: 600 }, { kind: "subway", station_from: "노원역", station_to: "사당역", line: "4호선" }];
+
+Deno.test("개인 첫 도보: started_at→platform_at 중앙값 (최근 60일, excluded 제외, 1~40분, 3회 이상)", () => {
+  eq(personalWalkSec([wt(5), wt(7), wt(6, 1, false), ...NOISE], now), 360, "중앙값 6분 (제외·61일 전·45분·30초·platform_at 없음은 뺌)");
+  eq(personalWalkSec([wt(5), wt(7), ...NOISE], now), null, "쓸 기록 2회면 null");
+  eq(personalWalkSec([wt(5), wt(6), wt(7), wt(8)], now), 390, "짝수 개면 가운데 둘 평균");
+  eq(personalWalkSec([wt(1), wt(40), wt(40)], now), 2400, "1분·40분 경계 포함");
+  const r = { started_at: "2026-10-30T08:00:00.12345+00:00", platform_at: "2026-10-30T08:05:00.5+00:00" };
+  eq(personalWalkSec([r, r, r], new Date("2026-11-01T00:00:00Z")), 300, "소수 초 5자리 시각도 읽음");
+  eq(firstWalkSec(WALK_SUB, [wt(5), wt(5), wt(5)], now), { sec: 300, n: 3, personal: true }, "개인값 있으면 그것");
+  eq(firstWalkSec(WALK_SUB, [wt(5)], now), { sec: 600, n: 1, personal: false }, "기록 부족하면 segments expected_sec");
+  eq(firstWalkSec(ROUTE5, null, now), { sec: 0, n: 0, personal: false }, "첫 구간이 버스면 구간 예상 0");
+});
+
+Deno.test("liveChain: 개인 첫 도보 — 10분 예상 대신 내 기록 5분이면 400초 열차부터, 버스로 시작해도 반영", async () => {
+  const env = fakeEnv(fakeFetch({ 노원: NOWON, 사당: SADANG }));
+  const base = await liveChain(WALK_SUB, 0, 0, env);
+  const mine = await liveChain(WALK_SUB, 0, 0, env, { trips: [wt(5), wt(4), wt(6), ...NOISE] });
+  const few = await liveChain(WALK_SUB, 0, 0, env, { trips: [wt(5), wt(4)] });
+  eq([base[0].readyInSec, base[0].waits], [600, [760, 1200]], "구간 예상 10분");
+  eq([mine[0].readyInSec, mine[0].waits, mine[0].chain], [300, [400, 760], "역까지 도보 5분 = 노원역 5분 뒤"], "내 기록 5분");
+  eq(liveText(mine), "🚇 지금 출발하면: 4호선 1분·7분 뒤 도착", "watch.py와 같은 문구");
+  eq(few[0].readyInSec, 600, "기록 2회면 segments expected_sec");
+  const moving = await liveChain(WALK_SUB, 1, 120, env, { trips: [wt(5), wt(5), wt(5)] });
+  eq(moving[0].readyInSec, 120, "fromIndex가 첫 승차 구간이면(이동 중) trips 무시, walkSec 그대로");
+  const r5 = await liveChain(ROUTE5, 0, 0, fakeEnv(fakeFetch({ 노원: NOWON_CHAIN, 선바위: SEONBAWI }, { "11354": [BUS_NOW] })), { trips: [wt(2), wt(2), wt(2)] });
+  eq(r5.map((i) => [i.index, i.readyInSec, i.waits]), [[0, 120, [428, 900]], [2, 1199, [1230, 1500]]], "버스로 시작: 정류장까지 2분, 노원역은 그대로 20분 뒤");
+  eq(liveText(r5), "🚌 지금 출발하면: 1132번 5분·13분 뒤 도착 / 4호선 1분 미만·5분 뒤", "test_watch.py와 같은 문구");
 });
 
 // ---------- boardingVehicle / rideEta (가짜 fetch) ----------

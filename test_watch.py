@@ -263,6 +263,49 @@ p, why = w.pick_bus_stop(ents, {"station_to": "노원구청"})
 ok(p == [ents[1]], f"길 건너 정류장 고르기 ({why})")
 ok(w.bus_stop_ids({"station_from": "노원역 11234"}) == [["11234"]], "station_from 안의 arsId 사용")
 
+print("== 개인 첫 도보: started_at→platform_at 중앙값 (최근 60일, excluded 제외, 1~40분, 3회 이상)")
+from datetime import timedelta
+def wt(minutes, days_ago=1, excluded=None, platform=True):
+    st = now - timedelta(days=days_ago)
+    t = {"started_at": st.isoformat(), "platform_at": (st + timedelta(minutes=minutes)).isoformat() if platform else None}
+    if excluded is not None:
+        t["excluded"] = excluded
+    return t
+noise = [wt(9, excluded=True), wt(4, days_ago=61), wt(45), wt(0.5), wt(6, platform=False)]
+ok(w.personal_walk_sec([wt(5), wt(7), wt(6, excluded=False)] + noise, now) == 360, "중앙값 6분 (제외·61일 전·45분·30초·platform_at 없음은 뺌)")
+ok(w.personal_walk_sec([wt(5), wt(7)] + noise, now) is None, "쓸 기록 2회면 None")
+ok(w.personal_walk_sec([wt(5), wt(6), wt(7), wt(8)], now) == 390, "짝수 개면 가운데 둘 평균 (6분 30초)")
+ok(w.personal_walk_sec([wt(1), wt(40), wt(40)], now) == 2400, "1분·40분 경계 포함")
+ok(w.personal_walk_sec([{"started_at": "2026-10-30T08:00:00.12345+00:00", "platform_at": "2026-10-30T08:05:00.5+00:00"}] * 3,
+                       w.parse_ts("2026-11-01T00:00:00+00:00")) == 300, "소수 초 5자리 시각도 읽음")
+walk_sub = [{"kind": "walk", "expected_sec": 600}, {"kind": "subway", "station_from": "노원역", "station_to": "사당역", "line": "4호선"}]
+ok(w.first_walk_sec(walk_sub, [wt(5), wt(5), wt(5)], now) == (300, 3, True), "개인값 있으면 그것")
+ok(w.first_walk_sec(walk_sub, [wt(5)], now) == (600, 1, False), "기록 부족하면 segments expected_sec")
+ok(w.first_walk_sec(route5, [], now) == (0, 0, False), "첫 구간이 버스면 구간 예상 0")
+walk_fake = {"노원": [tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, bar=b, no=b) for b in ("200", "400", "760", "1200")],
+             "사당": [tr("1004", "하행", "오이도행 - 남태령방면", 1004000433, 1004000434, 1004000456)]}
+r5_fake = {"노원": [tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, bar=b, no=b) for b in ("780", "1230", "1500")],
+           "선바위": [tr("1004", "하행", "오이도행 - 경마공원방면", 1004000435, 1004000436, 1004000456)]}
+cur = {}
+real = (w.fetch_arrivals, w.bus_get, w.SUBWAY_KEY, w.BUS_KEY)
+w.fetch_arrivals = lambda st: cur.get(st, [])
+w.bus_get = lambda op, **p: {"11354": [bus_now]}.get(p.get("arsId"), []) if op == "stationinfo/getStationByUid" else []
+w.SUBWAY_KEY, w.BUS_KEY = (w.SUBWAY_KEY or "x"), (w.BUS_KEY or "x")
+try:
+    cur = walk_fake
+    base = w.live_lines(walk_sub, now)                                  # 구간 예상 10분 → 760초 열차부터
+    mine = w.live_lines(walk_sub, now, [wt(5), wt(4), wt(6)] + noise)   # 내 기록 5분 → 400초 열차부터
+    few = w.live_lines(walk_sub, now, [wt(5), wt(4)])                   # 2회뿐 → 구간 예상 그대로
+    cur = r5_fake
+    bus_first = w.live_lines(route5, now, [wt(2), wt(2), wt(2)])         # 버스로 시작해도 정류장까지 2분
+finally:
+    w.fetch_arrivals, w.bus_get, w.SUBWAY_KEY, w.BUS_KEY = real
+ok(base[0]["waits"] == [160, 600] and mine[0]["waits"] == [100, 460], f"첫 도보 10분 → 내 기록 5분: 400초 열차부터 ({w.live_text(mine)})")
+ok(few[0]["waits"] == base[0]["waits"], "기록 2회면 segments expected_sec")
+sub5 = [it for it in bus_first if it["kind"] == "subway"]
+ok(bus_first[0]["waits"] == [308, 780] and len(sub5) == 1 and sub5[0]["waits"] == [1230 - 1199, 1500 - 1199],
+   f"버스로 시작: 정류장까지 2분(내 기록) → 버스 대기 5분·13분, 노원역은 그대로 20분 뒤 ({w.live_text(bus_first)})")
+
 print("== 키 가리기")
 leak = f"http://x/{w.SUBWAY_KEY}/json?serviceKey={w.quote(w.BUS_KEY, safe='')}&t={w.BOT_TOKEN}"
 r = w.redact(leak)

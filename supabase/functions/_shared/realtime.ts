@@ -8,7 +8,10 @@
 //   waits: 지금부터 몇 초 뒤 이 역·정류장에 오는지. readyInSec(그 승차 지점에 닿는 시각) 이후에 오는 차만, 빠른 순 최대 2대.
 //   note : 대기 대신 보일 말 ('열차 정보 없음', '보이는 열차는 놓칠 듯 · 다음 열차 기준', '운행종료', '방향 미확정' …). 탈 구간이 아니면 null.
 //   rough: 남은 시간을 역 수로 추정(코레일 구간) → 문구에 '약'.  ways: 방향 미확정이면 방향별, 버스 후보가 여럿이면 버스별 { line, waits }.
-// liveChain(segments, fromIndex, walkSec, env) → ChainItem[]  (walkSec = 지금부터 segments[fromIndex] 시작점에 닿기까지 남은 초)
+// liveChain(segments, fromIndex, walkSec, env, { trips? }) → ChainItem[]  (walkSec = 지금부터 segments[fromIndex] 시작점에 닿기까지 남은 초)
+//   trips를 주고 fromIndex가 0(출발 전 '지금 출발하면')이면 첫 승차 지점까지는 개인 첫 도보(firstWalkSec)를 쓴다.
+// firstWalkSec(segments, trips, now) → { sec, n, personal }  출발 지점 → 첫 승차 지점 예상(초).
+//   trips의 started_at→platform_at(최근 60일, excluded 아님, 1~40분)이 3회 이상이면 중앙값, 아니면 첫 승차 전 구간 expected_sec 합.
 // boardingVehicle(seg, env) → { vehId? | trainNo? }  승차 지점에서 지금 도착 중이거나 가장 먼저 오는 차 (탈 방향만). 못 정하면 {}.
 // rideEta(seg, ride, env) → { etaSec, source, rough? }  그 차가 하차 지점에 닿기까지 남은 초.
 //   지하철: 하차역 realtimeStationArrival에서 btrainNo == ride.trainNo 인 열차의 barvlDt. 버스: 하차 정류장 getStationByUid에서
@@ -26,9 +29,11 @@ export type Live = { line: string; waits: number[]; note?: string; rough?: boole
 export type ChainItem = Live & { index: number; kind: string; readyInSec: number; chain: string };
 export type Ride = { vehId?: string; trainNo?: string };
 export type RideEta = { etaSec: number | null; source: "live" | "none"; rough?: boolean };
+export type TripRow = { started_at?: string | null; platform_at?: string | null; excluded?: boolean | null; [k: string]: unknown };
 
 export const REALTIME_HORIZON = 30 * 60;   // 실시간 API가 보여 주는 대략의 범위(초). 이보다 먼 뒤 구간은 조회 안 함
 export const SEC_PER_STATION = 120;        // 남은 시간 없이 역 수만 올 때 역당 추정 초
+export const WALK_DAYS = 60, WALK_MIN_SEC = 60, WALK_MAX_SEC = 40 * 60, WALK_MIN_TRIPS = 3;   // 개인 첫 도보 (watch.py와 같은 값)
 const LINE_ID: Record<string, string> = {
   "1호선": "1001", "2호선": "1002", "3호선": "1003", "4호선": "1004", "5호선": "1005",
   "6호선": "1006", "7호선": "1007", "8호선": "1008", "9호선": "1009",
@@ -471,24 +476,62 @@ export async function rideEta(seg: Seg, ride: Ride, env: Env): Promise<RideEta> 
   }
 }
 
+// ---------- 개인 첫 도보 (watch.py walk_samples·personal_walk_sec·first_walk_sec) ----------
+/** 첫 도보 개인 기록(초) = started_at→platform_at. 최근 60일 + excluded 아님 + 1~40분만. */
+export function walkSamples(trips: TripRow[] | null | undefined, now: Date = new Date()): number[] {
+  const since = now.getTime() - WALK_DAYS * 86400e3, out: number[] = [];
+  for (const t of trips ?? []) {
+    if (t.excluded || !t.started_at || !t.platform_at) continue;
+    const st = Date.parse(t.started_at), d = (Date.parse(t.platform_at) - st) / 1000;
+    if (st >= since && WALK_MIN_SEC <= d && d <= WALK_MAX_SEC) out.push(d);
+  }
+  return out;
+}
+/** 개인 기록이 3회 이상이면 중앙값(초, 반올림), 아니면 null. */
+export function personalWalkSec(trips: TripRow[] | null | undefined, now: Date = new Date()): number | null {
+  const v = walkSamples(trips, now).sort((a, b) => a - b);
+  if (v.length < WALK_MIN_TRIPS) return null;
+  return Math.round((v[(v.length - 1) >> 1] + v[v.length >> 1]) / 2);
+}
+/** 출발 지점 → 첫 승차 지점 예상(초). 개인값이 없으면 첫 승차 전 구간 expected_sec 합.
+ *  카카오가 출발 도보를 구간으로 안 줬어도(첫 구간이 버스) 개인값이 있으면 그 시간을 쓴다. */
+export function firstWalkSec(segments: Seg[], trips: TripRow[] | null | undefined, now: Date = new Date()) {
+  let expected = 0;
+  for (const s of segments) { if (isRide(s)) break; expected += s.expected_sec || 0; }
+  const personal = personalWalkSec(trips, now);
+  return { sec: personal ?? expected, n: walkSamples(trips, now).length, personal: personal !== null };
+}
+
 /** watch.py live_lines 체인. segments[fromIndex]부터 따라가며 각 승차 지점에 닿는 시각(readyInSec)을 쌓는다:
  *    walkSec + 도보·환승·승차 예상 + 앞 구간에서 고른 차의 실제 대기 (traTime·barvlDt)
  *    예) 정류장까지 도보 0분 + 버스 대기 7분 + 승차 8분 + 환승 도보 4분 = 노원역 20분 뒤 → 20분 뒤 이후 첫 열차
  *  첫 탈 구간은 항상 한 항목(note 포함), 뒤 구간은 잡을 수 있는 차가 보일 때만. 탈 차를 못 정하면(놓침·정보 없음·방향 미확정)
- *  그다음 승차 시각을 알 수 없어 멈추고, 뒤 구간이 30분 넘게 남아도 멈춘다. */
-export async function liveChain(segments: Seg[], fromIndex: number, walkSec: number, env: Env): Promise<ChainItem[]> {
+ *  그다음 승차 시각을 알 수 없어 멈추고, 뒤 구간이 30분 넘게 남아도 멈춘다.
+ *  opts.trips(이 경로 trips 행)를 주고 fromIndex가 0이면 첫 승차 지점까지 = walkSec + 개인 첫 도보(3회 이상일 때, 구간 예상 대신).
+ *  이미 출발해서 첫 승차 구간부터 부를 땐 trips 대신 walkSec = max(0, firstWalkSec(...).sec − 출발 뒤 흐른 초)를 넘긴다. */
+export async function liveChain(segments: Seg[], fromIndex: number, walkSec: number, env: Env,
+                                opts: { trips?: TripRow[] | null } = {}): Promise<ChainItem[]> {
   env = { ...env, now: env.now ?? new Date() };               // 모든 구간을 같은 '지금' 기준으로
   const log = env.log ?? ((m: string) => console.log(m));
   const out: ChainItem[] = [];
   let offset = walkSec, first = true, chain: string[] = [];
+  let personal: number | null = null;                         // 개인 첫 도보(초) — 있으면 첫 승차 전 구간 예상 대신
+  if (opts.trips && fromIndex <= 0 && segments.some(isRide)) {
+    const fw = firstWalkSec(segments, opts.trips, env.now);
+    if (fw.personal) { personal = fw.sec; log(`    첫 도보: 내 기록 ${fw.n}회 중앙값 ${mins(fw.sec)}분 (구간 예상 대신)`); }
+    else log(`    첫 도보: 내 기록 ${fw.n}회 (${WALK_MIN_TRIPS}회 미만) → 구간 예상 ${mins(fw.sec)}분`);
+  }
   for (let i = Math.max(0, fromIndex); i < segments.length; i++) {
     const seg = segments[i], sec = seg.expected_sec || 0;
     if (!isRide(seg)) {
       if (!first) chain.push(`${seg.kind === "transfer" ? "환승 도보" : "도보"} ${mins(sec)}분`);
-      offset += sec;
+      if (!(first && personal !== null)) offset += sec;
       continue;
     }
-    if (first) chain = [`${seg.kind === "bus" ? "정류장" : "역"}까지 도보 ${mins(offset)}분`];
+    if (first) {
+      if (personal !== null) offset += personal;
+      chain = [`${seg.kind === "bus" ? "정류장" : "역"}까지 도보 ${mins(offset)}분`];
+    }
     const chainTxt = `${chain.join(" + ")} = ${placeOf(seg)} ${mins(offset)}분 뒤`;
     if (!first) {
       log(`    체인: ${chainTxt}`);

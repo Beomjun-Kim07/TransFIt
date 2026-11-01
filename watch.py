@@ -37,6 +37,7 @@ KST = timezone(timedelta(hours=9))
 LIVE_WINDOW_MIN = 10          # 출발 시각 ±10분 안에 실시간 보정 알림
 MIN_SAMPLES = 5               # 이만큼 기록이 쌓이면 개인 분위수를 쓴다
 LOOKBACK_DAYS = 60
+WALK_DAYS, WALK_MIN_SEC, WALK_MAX_SEC, WALK_MIN_TRIPS = 60, 60, 40 * 60, 3   # 개인 첫 도보: 최근 60일, 1~40분, 3회 이상
 REALTIME_HORIZON = 30 * 60    # 실시간 API가 보여 주는 대략의 범위. 이보다 먼 환승 구간은 건너뛴다
 
 LINE_ID = {"1호선": "1001", "2호선": "1002", "3호선": "1003", "4호선": "1004", "5호선": "1005",
@@ -106,13 +107,13 @@ def notify_once(route, day, kind, send_fn):
 
 def fetch_trips(route_id, since):
     """최근 기록. excluded 컬럼이 아직 DB에 없으면(400, 42703) 그 컬럼 없이 다시 조회해 알림이 멈추지 않게 한다."""
-    params = {"route_id": f"eq.{route_id}", "started_at": f"gte.{since}", "select": "started_at,ended_at,excluded"}
+    params = {"route_id": f"eq.{route_id}", "started_at": f"gte.{since}", "select": "started_at,platform_at,ended_at,excluded"}
     try:
         return sb_get("trips", params)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 400 and "excluded" in e.response.text:
             print("    trips.excluded 컬럼 없음 → 제외 표시 없이 조회")
-            return sb_get("trips", dict(params, select="started_at,ended_at"))
+            return sb_get("trips", dict(params, select="started_at,platform_at,ended_at"))
         raise
 
 # ---------- 텔레그램 ----------
@@ -165,6 +166,36 @@ def usable_durations(trips):
         if 180 <= d <= 3 * 3600:
             durs.append(d)
     return durs
+
+def walk_samples(trips, now):
+    """첫 도보 개인 기록(초) = started_at→platform_at. 최근 WALK_DAYS일 + excluded 아님 + 1~40분만."""
+    since, out = now - timedelta(days=WALK_DAYS), []
+    for t in trips or ():
+        if t.get("excluded") or not (t.get("started_at") and t.get("platform_at")):
+            continue
+        st = parse_ts(t["started_at"])
+        d = (parse_ts(t["platform_at"]) - st).total_seconds()
+        if st >= since and WALK_MIN_SEC <= d <= WALK_MAX_SEC:
+            out.append(d)
+    return out
+
+def personal_walk_sec(trips, now):
+    """개인 기록이 3회 이상이면 중앙값(초, 반올림 — JS Math.round와 같게), 아니면 None."""
+    v = sorted(walk_samples(trips, now))
+    if len(v) < WALK_MIN_TRIPS:
+        return None
+    return int(math.floor((v[(len(v) - 1) // 2] + v[len(v) // 2]) / 2 + 0.5))
+
+def first_walk_sec(segments, trips, now):
+    """출발 지점 → 첫 승차 지점 예상(초) → (초, 개인 기록 수, 개인값인지). 개인값이 없으면 첫 승차 전 구간 expected_sec 합.
+    카카오가 출발 도보를 구간으로 안 줬어도(첫 구간이 버스) 개인값이 있으면 그 시간을 쓴다."""
+    expected = 0
+    for s in segments:
+        if s.get("kind") in ("subway", "bus"):
+            break
+        expected += s.get("expected_sec") or 0
+    personal = personal_walk_sec(trips, now)
+    return (expected if personal is None else personal), len(walk_samples(trips, now)), personal is not None
 
 LATER = "(기록 쌓이면 바뀜)"
 
@@ -610,22 +641,34 @@ def place_of(seg):
     m = BUS_LINE_RE.match(seg.get("line") or "")
     return (m.group(2).split("→")[0] if m else stop_name(seg.get("station_from"))) or seg.get("station_from") or "정류장"
 
-def live_lines(segments, now):
+def live_lines(segments, now, trips=None):
     """구간을 순서대로 따라가며 각 승차 지점에 닿는 시각(offset)을 체인으로 쌓고, 그 시각 이후 첫 열차·버스를 고른다.
+    첫 승차 지점까지는 trips의 개인 첫 도보(started_at→platform_at 중앙값, 3회 이상)가 있으면 그것, 없으면 구간 예상.
     도보·환승·승차는 예상 시간, 차 대기는 앞 구간에서 고른 차의 실제 대기(traTime·barvlDt):
       정류장까지 도보 0분 + 버스 대기 7분 + 승차 8분 + 환승 도보 4분 = 노원역 20분 뒤 → 20분 뒤 이후 첫 열차.
     첫 승차 구간은 항상 한 항목, 뒤 구간은 잡을 수 있는 차가 보일 때만. 앞 구간에서 탈 차를 못 정하면
     (놓침·정보 없음·방향 미확정) 뒤 구간 도착 시각을 알 수 없어 거기서 멈춘다. → 항목 목록(live_item)."""
     out, offset, first, chain = [], 0, True, []
     mins = lambda sec: round(sec / 60)
+    personal = None   # 개인 첫 도보(초) — 있으면 첫 승차 전 구간 예상 대신
+    if trips is not None and any(s.get("kind") in ("subway", "bus") for s in segments):
+        walk, n, is_personal = first_walk_sec(segments, trips, now)
+        if is_personal:
+            personal = walk
+            print(f"    첫 도보: 내 기록 {n}회 중앙값 {mins(walk)}분 (구간 예상 대신)")
+        else:
+            print(f"    첫 도보: 내 기록 {n}회 ({WALK_MIN_TRIPS}회 미만) → 구간 예상 {mins(walk)}분")
     for i, seg in enumerate(segments):
         kind, sec = seg.get("kind"), seg.get("expected_sec") or 0
         if kind not in ("subway", "bus"):
             if not first:
                 chain.append(f"{'환승 도보' if kind == 'transfer' else '도보'} {mins(sec)}분")
-            offset += sec
+            if not (first and personal is not None):
+                offset += sec
             continue
         if first:
+            if personal is not None:
+                offset += personal
             chain = [f"{'정류장' if kind == 'bus' else '역'}까지 도보 {mins(offset)}분"]
         else:
             print(f"    체인: {' + '.join(chain)} = {place_of(seg)} {mins(offset)}분 뒤")
@@ -684,7 +727,7 @@ def main():
         pre_msg = pre_text(arrive, depart, mins, basis, segments)
 
         if TEST:   # 실제 알림과 같은 함수로 pre(버튼) · live(버튼 없음) 두 통
-            live_msg = live_text(live_lines(segments, now))
+            live_msg = live_text(live_lines(segments, now, trips))
             for l in (pre_msg + "\n" + live_msg).split("\n"):
                 print("    |", l)
             res = send_pre(chat_id, route["id"], pre_msg + "\n(테스트 실행)")
@@ -707,7 +750,7 @@ def main():
         # 알림 2: 출발 시각 ±LIVE_WINDOW_MIN, 실시간 보정 (실시간 조회는 보낼 차례일 때만)
         if depart - timedelta(minutes=LIVE_WINDOW_MIN) <= now <= depart + timedelta(minutes=LIVE_WINDOW_MIN):
             try:
-                if notify_once(route, today, "live", lambda: send_live(chat_id, live_text(live_lines(segments, now)))):
+                if notify_once(route, today, "live", lambda: send_live(chat_id, live_text(live_lines(segments, now, trips)))):
                     print("    live 발송")
                 else:
                     print("    live 이미 보냄 (오늘 notifications에 있음) — 건너뜀")
