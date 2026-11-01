@@ -62,9 +62,18 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
   - **웹앱 배포: https://transfit-web.vercel.app** (Vercel GitHub 연동, Root Directory `web`, main push마다 자동 재배포. 배포본 = 저장소 `web/index.html` 확인)
   - README: 소개·배포 URL·데이터 출처. 저장소에 비밀 키·HAR 없음 확인 (공개 키 `web/config.js`, 채팅 ID만 있음)
   - 버스 정류소정보조회 승인 확인 (실제 호출 정상)
-- 진행 중: C — Supabase Site URL 등록(사용자), 폰에서 배포본 확인, plan.md 나머지·발표 대본
+- 진행 중·남은 것: 아래 "남은 일"
 
-## 다음 할 일 (순서대로)
+## 남은 일 (2026-11-01 기준)
+- **A (함수)**: B의 `boardingVehicle`·`rideEta`·`firstWalkSec`(`_shared/realtime.ts`)를 `_shared/trip_message.ts`에 연결 — 탑승 버튼 때 탄 차 저장, 탑승 중 하차 지점 실시간 도착, 개인 첫 도보. 먼저 `trips`에 `ride_veh`·`ride_train` 컬럼 SQL 필요(사용자 실행 → schema.sql 반영).
+- **B (알림)**: watch.yml cron을 `'17,47 * * * *'`(30분 보험, 평소엔 tick이 workflow_dispatch로 깨움)로, Actions 조회는 `GH_DISPATCH_TOKEN` 사용. **11/01 확인: 아직 안 됨** — watch.yml은 `3-59/10` 그대로, tick엔 dispatch만 있고 실행 조회 코드 없음.
+- **사용자**: B cron 변경이 push된 뒤 저장소 private 전환 → 키 교체(SUPABASE secret, KAKAO, TELEGRAM_SECRET, GH_DISPATCH_TOKEN, BOT_TOKEN). 순서·넣을 곳은 A가 체크리스트로 제공.
+- **사용자 폰 확인** (https://transfit-web.vercel.app): ① 구간 수정 저장(출발 기준 갱신 확인 포함) ② 기록 탭 상세 스와이프 뒤로가기 ③ 정류장·역에서 출발/도착하는 경로 저장 때 걷는 시간 시트(저장 뒤 홈 예상 분이 고른 분만큼 늘어나는지).
+- **조연준**: 안드로이드 앱 → `trip` 함수(api_token) 연동, `feat/android-app` 브랜치.
+- **결정 대기**: 웹앱 자체 알림(텔레그램 없이) — 할지 말지.
+- 이전 목록에서 넘어온 것: Supabase Site URL 등록(사용자) · 반복 방지 검사(아래 5) · `routes.baseline_src` 컬럼 SQL 실행 여부 확인·schema.sql 반영·watch.py/telegram 근거 문구(B·A, 아직 코드에 없음) · plan.md 나머지·1분 발표 대본(C).
+
+## 처음 할 일 목록 (기록용 — 남은 건 위 "남은 일")
 1. ✅ (A `e75da7f`) **Edge Function `route` 배포**: `supabase login` → `supabase link --project-ref ezpvhadfzpznzwmhaktp` → `supabase secrets set KAKAO_REST_KEY=… BUS_KEY=…`(값은 .env.local에서) → `supabase functions deploy route`. 카카오 `time` 단위는 초로 확인됨.
 2. ✅ (A `e75da7f`) **텔레그램 연결 함수** `supabase/functions/telegram/index.ts`: 텔레그램 웹훅. `/start <link_code>` 수신 → `users.link_code`로 찾아 `telegram_chat_id` 저장 → "연결됐어요" 답장. `setWebhook`으로 등록. 이후 역사 안 버튼(열차 탐/환승 하차/환승 탑승)도 같은 함수에서 `callback_query`로 받아 `trips`에 적는다.
 3. ✅ (B `5341692`) **지하철 방향(updn) 자동 결정**: 카카오 응답엔 방향이 없다. 실시간 API의 `trainLineNm`("성수행 - 홍대입구방면")에서 다음 역/종점을 보고 segments.updn을 채우거나, watch.py에서 방면으로 필터한다.
