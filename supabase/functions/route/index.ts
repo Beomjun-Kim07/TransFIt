@@ -2,7 +2,8 @@
 // 브라우저가 카카오 키를 들고 있지 않도록, 길찾기를 서버에서 대신 호출한다.
 // 입력: { from: "노원역", to: "연세대학교 정문" }                       ← 이름으로 지오코딩
 //       { fromX, fromY, toX, toY, from?, to? }                        ← 좌표(경도 x, 위도 y)를 주면 지오코딩 생략. from/to는 표시 이름
-// 출력: { from:{name,x,y}, to:{name,x,y}, routes:[{type,totalTime,totalDistance,transfers,fare,steps:[...]}] }
+// 출력: { from:{name,x,y}, to:{name,x,y}, originIsStop, routes:[{type,totalTime,totalDistance,transfers,fare,originIsStop,steps:[...]}] }
+//       첫 승차 지점이 출발 좌표에서 30m 이상이면 WALKING step(added:true)을 앞에 붙이고 totalTime/totalDistance에 더한다. 30m 이내면 originIsStop:true
 // 단위: time/totalTime은 초, distance/totalDistance는 m (2026-10-31 실제 응답으로 확인).
 // 카카오 stops에는 이름만 오고 정류장 번호가 없다. BUS 구간은 path.points의 첫/끝 좌표로
 // 서울 버스 API getStationByPos를 불러 arsId(5자리)를 채운다. (BUS_KEY 없거나 실패하면 null)
@@ -23,6 +24,42 @@ async function geocode(q: string) {
   const d = j.documents?.[0];
   if (!d) throw new Error(`'${q}'을(를) 찾지 못했어요`);
   return { name: d.place_name, x: d.x, y: d.y, address: d.road_address_name || d.address_name };
+}
+
+// 카카오 publictraffic은 출발지→첫 승차 지점 도보를 생략할 때가 있다 (2026-11-01 확인: 건영3차아파트 출발인데 첫 step이 BUS, 승차 지점은 396m 밖).
+// 첫 step이 WALKING이 아니고 출발 좌표와 첫 승차 지점이 ORIGIN_STOP_M 이상 떨어져 있으면 도보 step을 앞에 붙인다.
+// 거리는 /v2/routing/walk, 시간은 거리 ÷ 3.7 km/h (네이버 도보 상수, 웹·watch.py와 같은 기준). 30m 이내면 originIsStop:true.
+const ORIGIN_STOP_M = 30;
+const WALK_MPS = 3.7 * 1000 / 3600;
+function haversine(x1: number, y1: number, x2: number, y2: number) {
+  const p = Math.PI / 180, dx = (x2 - x1) * p * Math.cos((y1 + y2) / 2 * p), dy = (y2 - y1) * p;
+  return 6371000 * Math.hypot(dx, dy);
+}
+const walkCache = new Map<string, number>();
+async function walkDistance(x1: number, y1: number, x2: number, y2: number): Promise<number> {
+  const key = `${x1.toFixed(5)},${y1.toFixed(5)}>${x2.toFixed(5)},${y2.toFixed(5)}`;
+  if (walkCache.has(key)) return walkCache.get(key)!;
+  let d = haversine(x1, y1, x2, y2);
+  try {
+    const r = await fetch(`https://dapi.kakao.com/v2/routing/walk?start_x=${x1}&start_y=${y1}&end_x=${x2}&end_y=${y2}`, { headers: H });
+    if (r.ok) { const j = await r.json(); const wd = Number(j?.route?.legs?.[0]?.properties?.distance); if (wd > 0) d = wd; }
+  } catch (_) { /* 직선거리로 */ }
+  walkCache.set(key, d);
+  return d;
+}
+/** 첫 step 앞에 출발지 도보를 붙인다. → { route, originIsStop } */
+async function prependOriginWalk(route: any, origin: { name: string; x: string; y: string }, rawFirst: any) {
+  const first = route.steps[0];
+  const pts: number[][] = rawFirst?.path?.points ?? [];
+  if (!first || first.type === "WALKING" || !pts.length) return { route, originIsStop: false };
+  const ox = Number(origin.x), oy = Number(origin.y), [sx, sy] = pts[0];
+  const straight = haversine(ox, oy, sx, sy);
+  if (straight < ORIGIN_STOP_M) return { route, originIsStop: true };
+  const distance = Math.round(await walkDistance(ox, oy, sx, sy));
+  const time = Math.round(distance / WALK_MPS);
+  const walk = { type: "WALKING", time, distance, from: origin.name, to: first.from, arsId: null, arsIdTo: null, line: null, vehicleType: null,
+                 guidance: `${origin.name}에서 ${first.from ?? "승차 지점"}까지 도보 (카카오 응답에 없어 추가)`, added: true };
+  return { route: { ...route, totalTime: (route.totalTime ?? 0) + time, totalDistance: (route.totalDistance ?? 0) + distance, steps: [walk, ...route.steps] }, originIsStop: false };
 }
 
 // 좌표(경도 x, 위도 y) 근처 정류장 중 이름이 같은 것, 없으면 가장 가까운 것의 arsId
@@ -88,8 +125,12 @@ Deno.serve(async (req) => {
     const r = await fetch(u, { headers: H });
     if (!r.ok) throw new Error(`길찾기 실패 ${r.status}: ${(await r.text()).slice(0, 200)}`);
     const j = await r.json();
-    const routes = await Promise.all((j.routes ?? []).map(simplify));
-    return new Response(JSON.stringify({ from: a, to: b, routes }), { headers: { ...cors, "Content-Type": "application/json" } });
+    const raw = j.routes ?? [];
+    const simplified = await Promise.all(raw.map(simplify));
+    const fixed = await Promise.all(simplified.map((r: any, i: number) => prependOriginWalk(r, a, raw[i]?.steps?.[0])));
+    const routes = fixed.map((f) => ({ ...f.route, originIsStop: f.originIsStop }));
+    const originIsStop = fixed.some((f) => f.originIsStop);   // 출발지가 정류장/역 자체(30m 이내) → 웹이 집→정류장 도보 분을 물어 넣는다
+    return new Response(JSON.stringify({ from: a, to: b, originIsStop, routes }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e?.message ?? e) }), { status: 400, headers: { ...cors, "Content-Type": "application/json" } });
   }
