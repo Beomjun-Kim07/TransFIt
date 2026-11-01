@@ -225,6 +225,14 @@
   .sheet-head { padding:14px 16px; text-align:center; font-size:13px; color:var(--label2) } .sheet-head b { display:block; font-weight:600 }
   .sheet .act { display:block; width:100%; min-height:57px; border:0; border-top:.5px solid var(--sep); background:none; font-size:20px; color:var(--accent) }
   .sheet .cancel { min-height:57px; border:0; border-radius:14px; background:var(--card); font-size:20px; font-weight:600; color:var(--accent) }
+  /* 걷는 시간 묻기: 시트 안 행 + iOS 스테퍼 */
+  .srow { display:flex; align-items:center; gap:12px; min-height:62px; padding:10px 16px; border-top:.5px solid var(--sep); text-align:left; font-size:17px }
+  .srow .sval { min-width:44px; text-align:right; font-weight:600 }
+  .stepper { display:flex; flex:none; border-radius:9px; background:var(--fill); overflow:hidden }
+  .stepper button { position:relative; width:48px; height:36px; border:0; background:none; padding:0; font-size:24px; line-height:1; color:var(--label) }
+  .stepper button + button::before { content:""; position:absolute; left:0; top:9px; bottom:9px; border-left:.5px solid var(--sep) }
+  .stepper button:active:not(:disabled) { background:var(--fill) } .stepper button:disabled { color:var(--label3); cursor:default }
+  .rail .est { font-size:12px; white-space:nowrap }
   .toast { position:fixed; left:50%; bottom:calc(92px + env(safe-area-inset-bottom)); z-index:50; transform:translate(-50%, 10px); opacity:0; pointer-events:none;
            background:var(--bar); -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); box-shadow:0 4px 20px rgba(0,0,0,.15); padding:11px 18px; border-radius:999px; font-size:15px; font-weight:600; transition:.2s }
   .toast.on { opacity:1; transform:translate(-50%, 0) }
@@ -745,7 +753,8 @@ function openMenu(id) {
   $("sheetBody").innerHTML = items.map(([t, fn, bad]) => `<button class="act${bad ? " danger" : ""}" onclick="closeMenu();${fn}">${t}</button>`).join("");
   $("sheet").classList.remove("hidden"); $("sheetBg").classList.remove("hidden");
 }
-function closeMenu() { $("sheet").classList.add("hidden"); $("sheetBg").classList.add("hidden"); }
+function closeMenu() { $("sheet").classList.add("hidden"); $("sheetBg").classList.add("hidden");
+  if (walkAsk) { const { resolve } = walkAsk; walkAsk = null; resolve(null); } }   // 걷는 시간 묻기를 바깥·취소·Esc로 닫으면 저장 안 함
 document.addEventListener("keydown", e => { if (e.key !== "Escape") return; if (segEdit) segCancel(); else closeMenu(); });
 
 // ---------- 길찾기 ----------
@@ -872,7 +881,7 @@ function stepRail(steps) {
       return { color: p.color, title: `${chip(p)} ${stopHtml(withArs(st.from, st.arsId)) || ""} 승차`,
                sub: `${stopHtml(withArs(st.to, st.arsIdTo)) || ""} 하차 · ${p.min}분` };
     return { walk: true, title: kind === "transfer" ? "환승 도보" : i === 0 ? `${esc(found.from.name)}에서 도보` : "도보",
-             sub: `${st.distance ? `${st.distance}m · ` : ""}${p.min}분` };
+             sub: `${st.distance ? `${st.distance}m · ` : ""}${p.min}분${st.added ? ` <span class="est">(카카오 미제공 · 추정)</span>` : ""}` };   // added = route 함수가 붙인 도보
   }).concat([{ end: true, title: esc(found.to.name), sub: "도착" }]));
 }
 function optionCard(r, i) {
@@ -947,14 +956,57 @@ function renderOptions() {
     : all.length ? `<div class="card empty"><b>이 조건의 경로가 없어요</b><button class="btn" style="margin-top:16px" onclick="setResFilter('all')">전체 보기</button></div>`
     : `<div class="card empty"><b>경로가 없어요</b><div class="sub">출발지나 도착지를 바꿔 보세요.</div></div>`;
 }
+// ---------- 저장 전 걷는 시간 묻기 ----------
+// route 응답의 경로별 originIsStop / destIsStop = 출발지·도착지가 첫 승차·마지막 하차 지점에서 30m 이내(정류장·역 자체).
+// 그러면 카카오 경로에 집→정류장, 정류장→목적지 도보가 없으니 분을 물어 walk 구간(거리 없음)으로 넣고 baseline_sec에도 더한다.
+const WALK_ASK_DEFAULT = 5, WALK_ASK_MAX = 60;
+let walkAsk = null;   // { items:[{label, place, min}], resolve }
+function askWalkMins(items) {   // → [분…] 또는 취소면 null
+  return new Promise(resolve => {
+    walkAsk = { items: items.map(it => ({ ...it, min: WALK_ASK_DEFAULT })), resolve };
+    $("sheetTitle").textContent = "걸어서 몇 분이에요?";
+    $("sheetMsg").textContent = "이 경로는 정류장·역에서 시작하거나 끝나요. 걷는 시간을 출발 시각 계산에 더해요.";
+    $("sheetBody").innerHTML = walkAsk.items.map((it, k) => `<div class="srow">
+        <div class="grow">${esc(it.label)}<div class="cap">${esc(it.place)}</div></div>
+        <output class="sval num" id="wa-${k}" aria-live="polite">${it.min}분</output>
+        <div class="stepper" id="ws-${k}" role="group" aria-label="${esc(it.label)} 걷는 시간">
+          <button type="button" aria-label="1분 줄이기" onclick="walkStep(${k},-1)">−</button>
+          <button type="button" aria-label="1분 늘리기" onclick="walkStep(${k},1)">+</button>
+        </div></div>`).join("") + `<button class="act" onclick="walkAskDone()">저장</button>`;
+    $("sheet").classList.remove("hidden"); $("sheetBg").classList.remove("hidden");
+  });
+}
+function walkStep(k, d) {
+  const it = walkAsk?.items[k]; if (!it) return;
+  it.min = Math.min(WALK_ASK_MAX, Math.max(0, it.min + d));
+  $("wa-" + k).textContent = `${it.min}분`;
+  const [dn, up] = $("ws-" + k).children; dn.disabled = it.min <= 0; up.disabled = it.min >= WALK_ASK_MAX;
+}
+function walkAskDone() {
+  if (!walkAsk) return;
+  const { items, resolve } = walkAsk; walkAsk = null; closeMenu(); resolve(items.map(it => it.min));
+}
 async function saveRoute(i) {
   if (!newDays.some(Boolean)) return alert("알림 받을 요일을 하나 이상 골라요.");
-  const r = found.routes[i];
+  const r = found.routes[i], from = found.from.name, to = found.to.name;
+  const rides = r.steps.filter(s => s.type !== "WALKING"), stopWord = s => s?.type === "SUBWAY" ? "역" : "정류장";
+  const asks = [];
+  if (r.originIsStop) asks.push({ at: "start", label: `집에서 ${stopWord(rides[0])}까지`, place: from });
+  if (r.destIsStop) asks.push({ at: "end", label: `${stopWord(rides[rides.length - 1])}에서 목적지까지`, place: to });
+  const add = { start: 0, end: 0 };   // 초
+  if (asks.length) {
+    const m = await askWalkMins(asks);
+    if (!m) return;
+    asks.forEach((a, k) => { add[a.at] = m[k] * 60; });
+  }
+  const walkRow = (sec, a, b) => ({ kind: "walk", station_from: a, station_to: b, line: null, updn: null, distance_m: null, expected_sec: sec });
   const { data: route, error } = await sb.from("routes").insert({ user_id: user.id,
-    name: `${found.from.name} → ${found.to.name}`, arrive_by: $("rArrive").value || "09:00",
-    active_days: daysStr(), baseline_sec: Math.round(r.totalTime) }).select().single();
+    name: `${from} → ${to}`, arrive_by: $("rArrive").value || "09:00",
+    active_days: daysStr(), baseline_sec: Math.round(r.totalTime) + add.start + add.end }).select().single();
   if (error) return alert(error.message);
-  const { error: e2 } = await sb.from("segments").insert(segmentRows(r, route.id));
+  const rows = [...(add.start ? [walkRow(add.start, "집", from)] : []), ...segmentRows(r, route.id), ...(add.end ? [walkRow(add.end, to, "목적지")] : [])]
+    .map((s, k) => ({ ...s, route_id: route.id, seq: k + 1 }));
+  const { error: e2 } = await sb.from("segments").insert(rows);
   if (e2) return alert(e2.message);
   $("routeOptions").innerHTML = ""; $("findMsg").textContent = ""; $("rFrom").value = $("rTo").value = "";
   picked.from = picked.to = null; $("resControls").classList.add("hidden");

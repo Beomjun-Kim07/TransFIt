@@ -57,6 +57,7 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
   - C `5018b64`: PWA(manifest·T 아이콘·홈 화면 추가 안내, 서비스 워커 없음). C `4188cc9`: 길찾기 장소 자동완성(places, 현재 위치·최근 3개, 좌표로 route) + 결과 필터 칩·정렬
   - C `174efc7`: 설정 탭 자동화 토큰 복사·재발급, route_id. C `189eee0`: 웹 출발 시각도 소요 1분 올림(watch.py plan과 일치). C `b57cc88`: 기록 탭 2단 화면(경로 리스트 → 상세·점 그래프, pushState 뒤로가기). C `8259401`: 길찾기 직접 입력 제거, 홈 ··· → 구간 수정
   - C `b591aca`: 설정 자동화 토큰을 맨 아래 "고급 · 자동 기록" 접힘으로. C: 구간 수정 저장 때 구간 합이 baseline_sec와 1분 이상 다르면 출발 기준 갱신 확인 → `baseline_sec`=구간 합, `baseline_src`='manual'. **대기: routes.baseline_src 컬럼 SQL(사용자), watch.py·telegram /next 근거 문구(B·A), schema.sql 반영**
+  - C: 길찾기 저장 때 경로의 `originIsStop`/`destIsStop`(A `14d8261`~)이면 "집에서 정류장까지"·"정류장에서 목적지까지" 걷는 분을 스테퍼(기본 5분)로 물어 kind 'walk'·distance_m null 구간을 맨 앞/뒤에 넣고 baseline_sec에 더함(0분이면 안 넣음). route가 붙인 `added:true` 도보는 일반 도보로 저장, 결과 상세에 "(카카오 미제공 · 추정)"
   - 조연준 `b32df54`: 안드로이드 앱 `android/` — main 병합 `80671eb`
   - **웹앱 배포: https://transfit-web.vercel.app** (Vercel GitHub 연동, Root Directory `web`, main push마다 자동 재배포. 배포본 = 저장소 `web/index.html` 확인)
   - README: 소개·배포 URL·데이터 출처. 저장소에 비밀 키·HAR 없음 확인 (공개 키 `web/config.js`, 채팅 ID만 있음)
