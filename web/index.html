@@ -327,6 +327,9 @@
     <section id="tab-settings" class="hidden">
       <div class="ghead">텔레그램 알림</div>
       <div id="tgBody"><div class="group"><div class="cell sub">불러오는 중…</div></div></div>
+      <div class="ghead">하차 알림</div>
+      <div id="alightBody"><div class="group"><div class="cell sub">불러오는 중…</div></div></div>
+      <div class="gfoot">탑승 버튼을 누른 뒤 내릴 곳(환승역·정류장, 마지막 하차 지점)이 가까워지면 텔레그램 새 메시지로 알려요. 탄 열차·버스를 실시간으로 못 찾으면 예상 시간으로 짐작하고 (추정)을 붙여요.</div>
       <div class="ghead">경로별 알림</div>
       <div id="routeSettings"></div>
       <div class="gfoot">신뢰 수준 90% = 내 기록 10번 중 9번은 늦지 않는 시각. 높일수록 일찍 출발해요.</div>
@@ -413,6 +416,7 @@ const TABS = ["home", "find", "records", "settings"], TITLES = { home:"TransFit"
 const HASH_TAB = location.hash.slice(1).split("/")[0];   // #records/12 같은 상세 주소로 새로 열면 첫 화면부터
 let user = null, shownFor, tab = TABS.includes(HASH_TAB) ? HASH_TAB : "home";
 let routes = [], segsBy = {}, tripsAll = [], tgLinked = null, apiToken, reissuing = false;   // apiToken: undefined = 아직 못 읽음, null = 없음
+let alightPref;   // users.alight_alerts ('2,1,0'): undefined = 아직 못 읽음, false = 컬럼 없음(SQL 실행 전)
 let busyId = null, skipTo = {}, newDays = [1,1,1,1,1,0,0], found = null, lastSync = 0;
 const openDetails = new Set();
 const $ = id => document.getElementById(id);
@@ -528,7 +532,7 @@ async function render() {
   document.body.classList.toggle("authed", !!user);   // 설치 안내를 탭바 위로 올린다
   $("auth").classList.toggle("hidden", !!user);
   $("app").classList.toggle("hidden", !user);
-  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; closeMenu(); closeRec(false); if (segEdit) hideSegEdit(); return; }
+  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; alightPref = undefined; closeMenu(); closeRec(false); if (segEdit) hideSegEdit(); return; }
   showTab(); lastSync = Date.now();
   await Promise.all([loadTelegram(), loadAll()]);
 }
@@ -555,10 +559,19 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 setInterval(() => { if (user && tab === "home" && !document.hidden) renderHome(); }, 30000);
 
 // ---------- 데이터 ----------
+// trips + 단계 기록(trip_events). 테이블을 만드는 SQL 전이면 trip_events를 빼고 읽는다 (옛 컬럼으로 단계를 본다)
+let tripCols = "*, trip_events(seg_index,kind,at)";
+const hasEvents = () => tripCols !== "*";
+async function selectTrips() {
+  const q = cols => sb.from("trips").select(cols).order("started_at", { ascending:false }).limit(500);
+  let res = await q(tripCols);
+  if (res.error && hasEvents() && /trip_events/.test(res.error.message)) { tripCols = "*"; res = await q(tripCols); }
+  return res;
+}
 async function loadAll() {
   const [rs, ts] = await Promise.all([
     sb.from("routes").select("*").order("id"),
-    sb.from("trips").select("*").order("started_at", { ascending:false }).limit(500)]);
+    selectTrips()]);
   if (rs.error) toast("경로를 못 불러왔어요: " + rs.error.message);
   routes = rs.data || []; tripsAll = ts.data || []; segsBy = {};
   if (routes.length) {
@@ -568,7 +581,7 @@ async function loadAll() {
   renderAll();
 }
 async function reloadTrips() {
-  const ts = await sb.from("trips").select("*").order("started_at", { ascending:false }).limit(500);
+  const ts = await selectTrips();
   if (!ts.error) tripsAll = ts.data || [];
   renderAll();
 }
@@ -604,31 +617,65 @@ function plan(r) {
 }
 
 // ---------- 홈 ----------
-// 경로 구간을 보고 누를 단계만: 버스면 '정류장/버스', 환승이 없으면 환승 단계 생략. [필드, 버튼 이름, 짧은 이름]
-function tripSteps(r) {
-  const segs = segsOf(r), transit = segs.filter(s => s.kind === "subway" || s.kind === "bus");
-  const bus = transit[0]?.kind === "bus";
-  const hasTransit = !segs.length || transit.length > 0;
-  const hasTransfer = !segs.length || transit.length >= 2 || segs.some(s => s.kind === "transfer");
-  const st = [["started_at", "출발했어요", "출발"]];
-  if (hasTransit) st.push(["platform_at", bus ? "정류장 도착" : "승강장 도착", bus ? "정류장" : "승강장"],
-                          ["boarded_at", bus ? "버스 탑승" : "열차 탑승", "탑승"]);
-  if (hasTransfer) st.push(["transfer_off_at", "환승역 하차", "환승 하차"], ["transfer_on_at", "환승 탑승", "환승 탑승"]);
-  st.push(["ended_at", "목적지 도착", "도착"]);
+// 기록 단계: 경로 segments에서 만든다 (supabase/functions/_shared/steps.ts와 같은 규칙, 환승 횟수 제한 없음)
+//   출발 → 첫 탈것 승강장/정류장 도착 → 탑승 → 하차 → 다음 탈것 탑승 → 하차 … → 목적지 도착 (마지막 하차 = 목적지 도착)
+//   예) 출발 · 작전 승강장 도착 · 인천1호선 탑승 · 계양 하차 · 공항철도 탑승 · 서울역 하차 · 4호선 탑승 · 목적지 도착
+// 기록은 trip_events(trip_id, seg_index, kind 'platform'|'board'|'alight', at). 옛 컬럼은 첫 값만 같이 채운다:
+//   첫 탈 구간 승강장 → platform_at, 탑승 → boarded_at, 하차 → transfer_off_at, 두 번째 탈 구간 탑승 → transfer_on_at (watch.py·개인 도보용)
+const KEEP_YEOK = new Set(["서울", "인천", "부산", "대전", "대구", "광주", "울산", "수원", "청주", "천안"]);   // 도시 이름과 같은 역은 '서울역'
+const normSt = v => { let n = (v || "").trim().split(" ")[0].replace(/\([^()]*선\)$/, ""); return n.length > 1 && n.endsWith("역") ? n.slice(0, -1) : n; };
+const stName = v => { const n = normSt(v); return KEEP_YEOK.has(n) ? n + "역" : n; };
+const isRideSeg = s => s.kind === "subway" || s.kind === "bus";
+const rideIdx = segs => segs.map((s, i) => isRideSeg(s) ? i : -1).filter(i => i >= 0);
+const busNames = s => { const m = /^\s*(.*?)\s*\((.*)\)\s*$/.exec(s.line || ""); return m ? m[2].split("→").map(x => x.trim() === "?" ? "" : x.trim()) : []; };
+const stopNm = v => { const n = (v || "").trim().replace(/\s*(?<!\d)\d{5}\s*$/, ""); return n || (v ? `${v}번 정류장` : ""); };
+const fromNm = s => s.kind === "subway" ? stName(s.station_from) : busNames(s)[0] || stopNm(s.station_from);
+const toNm = s => s.kind === "subway" ? stName(s.station_to) : busNames(s)[1] || stopNm(s.station_to);
+function rideNm(s) {   // '공항철도', '4호선', '인천1호선', '1142번'
+  if (s.kind === "bus") { const m = /^\s*(.*?)\s*\((.*)\)\s*$/.exec(s.line || ""), no = (m ? m[1] : s.line || "").trim().replace(/번+$/, ""); return no ? no + "번" : "버스"; }
+  const v = (s.line || "").replace(/^\s*수도권\s*/, "").trim(), m = /(?<!인천)([1-9])\s*호선/.exec(v);
+  return m ? `${m[1]}호선` : v || "지하철";
+}
+function tripSteps(r) {   // [{ kind: start|platform|board|alight|end, seg, label(버튼), short(기록 줄) }]
+  const segs = segsOf(r), rides = rideIdx(segs), st = [{ kind: "start", seg: -1, label: "출발했어요", short: "출발" }];
+  rides.forEach((i, k) => {
+    const s = segs[i], where = s.kind === "bus" ? "정류장" : "승강장", from = fromNm(s);
+    if (k === 0) st.push({ kind: "platform", seg: i, label: `${from ? from + " " : ""}${where} 도착`, short: where });
+    st.push({ kind: "board", seg: i, label: `${rideNm(s)} 탑승`, short: `${rideNm(s)} 탑승` });
+    if (k < rides.length - 1) { const to = toNm(s) || "환승 지점"; st.push({ kind: "alight", seg: i, label: `${to} 하차`, short: `${to} 하차` }); }
+  });
+  st.push({ kind: "end", seg: -1, label: "목적지 도착", short: "도착" });
   return st;
 }
-const lastFilled = (steps, t) => steps.reduce((k, [f], i) => t?.[f] ? i : k, -1);
+const LEGACY = { platform_at: [0, "platform"], boarded_at: [0, "board"], transfer_off_at: [0, "alight"], transfer_on_at: [1, "board"] };
+function compatOf(segs, seg, kind) {   // 이 단계와 같이 채울 옛 컬럼 (없으면 null)
+  const k = rideIdx(segs).indexOf(seg);
+  return Object.keys(LEGACY).find(f => LEGACY[f][0] === k && LEGACY[f][1] === kind) || null;
+}
+function evMap(t, segs) {   // 'seg:kind' → 시각. trip_events + 옛 컬럼(같은 단계가 trip_events에 없을 때만)
+  const m = new Map(), rides = rideIdx(segs);
+  for (const e of t.trip_events || []) if (e?.at) m.set(`${e.seg_index}:${e.kind}`, e.at);
+  for (const [f, [n, kind]] of Object.entries(LEGACY)) { const seg = rides[n]; if (t[f] && seg !== undefined && !m.has(`${seg}:${kind}`)) m.set(`${seg}:${kind}`, t[f]); }
+  return m;
+}
+function stepTimes(r, t) {   // 단계마다 찍힌 시각 (없으면 null)
+  const m = evMap(t || {}, segsOf(r));
+  return tripSteps(r).map(st => st.kind === "start" ? t?.started_at || null : st.kind === "end" ? t?.ended_at || null : m.get(`${st.seg}:${st.kind}`) || null);
+}
+const lastFilled = (r, t) => stepTimes(r, t).reduce((k, v, i) => v ? i : k, -1);
 function nextIdx(r, t) {
   const steps = tripSteps(r);
-  let n = lastFilled(steps, t) + 1;
+  let n = lastFilled(r, t) + 1;
   if (skipTo[t.id]) n = Math.max(n, skipTo[t.id]);
   return Math.min(n, steps.length - 1);
 }
+// 정거장 목록(승차·하차 포함) → '5개 역 · ' / '8개 정류장 · '. segments.stop_names·route steps[].stops (하차 알림 추정에도 쓴다)
+const hopsTxt = (kind, stops) => Array.isArray(stops) && stops.length > 1 ? `${stops.length - 1}개 ${kind === "bus" ? "정류장" : "역"} · ` : "";
 function segRail(r) {
   const items = segsOf(r).map((s, i) => {
     const p = partOf(s.kind, s.expected_sec, s.line), pl = segPlaces(s);
     if (s.kind === "subway" || s.kind === "bus")
-      return { color: p.color, title: `${chip(p)} ${pl.from || ""} 승차`, sub: `${pl.to || ""} 하차 · ${p.min}분${s.updn ? ` · ${esc(s.updn)}` : ""}` };
+      return { color: p.color, title: `${chip(p)} ${pl.from || ""} 승차`, sub: `${pl.to || ""} 하차 · ${hopsTxt(s.kind, s.stop_names)}${p.min}분${s.updn ? ` · ${esc(s.updn)}` : ""}` };
     return { walk: true, title: s.kind === "transfer" ? "환승 도보" : i === 0 && s.station_from ? `${pl.from}에서 도보` : "도보",
              sub: `${s.distance_m ? `${s.distance_m}m · ` : ""}${p.min}분` };
   });
@@ -637,9 +684,10 @@ function segRail(r) {
 function progressHtml(r, t) {
   if (!t) return "";
   let prev = null;
-  const done = tripSteps(r).filter(([f]) => t[f]).map(([f, , short]) => {
-    const gap = prev ? ` +${mins(prev, t[f])}` : ""; prev = t[f];
-    return `<span>${short} ${hhmm(new Date(t[f]))}${gap}</span>`;
+  const times = stepTimes(r, t);
+  const done = tripSteps(r).map((st, i) => [st, times[i]]).filter(([, at]) => at).map(([st, at]) => {
+    const gap = prev ? ` +${mins(prev, at)}` : ""; prev = at;
+    return `<span>${esc(st.short)} ${hhmm(new Date(at))}${gap}</span>`;
   }).join("");
   let head;
   if (!t.ended_at) head = `<b>이동 중</b> · ${hhmm(new Date(t.started_at))} 출발 · ${mins(t.started_at, new Date())}분째`;
@@ -657,7 +705,7 @@ function routeCard(r) {
   const when = open ? "이동 중" : done ? "" : !activeToday(r.active_days) ? "오늘은 쉬는 날"
     : left > 0 ? `${left >= 60 ? `${Math.floor(left / 60)}시간 ` : ""}${left % 60}분 남음` : left > -60 ? "출발 시각 지남" : "";
   let label = "출발했어요", cls = "filled";
-  if (open) label = tripSteps(r)[nextIdx(r, open)][1];
+  if (open) label = esc(tripSteps(r)[nextIdx(r, open)].label);
   else if (done) { label = "오늘 기록 완료 ✓"; cls = "gray"; }
   if (busyId === r.id) label = "기록 중…";
   return `<article class="card" id="rc-${r.id}">
@@ -681,10 +729,11 @@ function renderHome() {
 function cta(id) {
   const r = routeById(id); if (!r) return;
   const open = openTripOf(r);
-  if (open) markField(id, tripSteps(r)[nextIdx(r, open)][0]);
-  else if (!doneTodayOf(r)) markField(id, "started_at");
+  if (open) markStep(id, tripSteps(r)[nextIdx(r, open)]);
+  else if (!doneTodayOf(r)) markStep(id, { kind: "start" });
 }
-async function markField(id, f) {
+const markStart = id => markStep(id, { kind: "start" }), markEnd = id => markStep(id, { kind: "end" });
+async function markStep(id, st) {
   const r = routeById(id); if (!r || busyId !== null) return;
   const open = openTripOf(r);
   busyId = id; renderHome();
@@ -693,31 +742,53 @@ async function markField(id, f) {
   if (!open) {
     ({ error } = await sb.from("trips").insert({ user_id: user.id, route_id: r.id, started_at: now, source: "web",
       expected_sec: Math.round(estimate(r)[0]), walk_expected_sec: segsOf(r).find(s => s.kind === "walk")?.expected_sec || null }));
+  } else if (st.kind === "end") {
+    ({ error } = await sb.from("trips").update({ ended_at: now }).eq("id", open.id));
   } else {
-    ({ error } = await sb.from("trips").update({ [f]: now }).eq("id", open.id));
+    ({ error } = await recordStep(r, open, st, now));
   }
   busyId = null;
   if (error) { alert("기록 실패: " + error.message); renderHome(); return; }
+  if (open && st.kind === "board" && apiToken) rideLookup(r.id, st.seg);
   navigator.vibrate?.(20);
   await reloadTrips();
+}
+// 단계 하나: trip_events에 넣고(이미 있으면 그대로), 옛 컬럼이 대응하면 비어 있을 때만 같이 채운다
+async function recordStep(r, t, st, now) {
+  const field = compatOf(segsOf(r), st.seg, st.kind);
+  if (hasEvents()) {
+    const res = await sb.from("trip_events").upsert({ trip_id: t.id, seg_index: st.seg, kind: st.kind, at: now }, { onConflict: "trip_id,seg_index,kind", ignoreDuplicates: true });
+    if (res.error) return res;
+  } else if (!field) return { error: { message: "DB 업데이트(trip_events) 전이라 이 단계는 아직 기록할 수 없어요. ··· › 건너뛰기를 써 주세요." } };
+  if (field && !t[field]) return await sb.from("trips").update({ [field]: now }).eq("id", t.id).is(field, null);
+  return { error: null };
+}
+// 탑승 기록 직후 trip 함수에 같은 단계를 보낸다 → 이미 기록됨(duplicate)이지만 60초 안이라 그 순간 탄 열차·버스를 정해
+// trips.ride_train·ride_veh에 넣는다 (키가 있는 서버에서만 실시간 조회 가능). 하차 알림이 그 차를 따라간다. 실패해도 기록엔 영향 없음
+function rideLookup(routeId, seg) {
+  fetch(`${C.SUPABASE_URL}/functions/v1/trip`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: apiToken, route_id: routeId, seg_index: seg, kind: "board" }) }).catch(() => {});
 }
 function skipStep(id) {
   const r = routeById(id), open = r && openTripOf(r); if (!open) return;
   const steps = tripSteps(r), n = nextIdx(r, open);
-  if (steps[n][0] === "ended_at") return;
+  if (steps[n].kind === "end") return;
   skipTo[open.id] = n + 1; renderHome();
 }
 async function undoStep(id) {
   const r = routeById(id), open = r && openTripOf(r); if (!open || busyId !== null) return;
-  const steps = tripSteps(r), k = lastFilled(steps, open);
+  const steps = tripSteps(r), k = lastFilled(r, open);
   if (skipTo[open.id] > k + 1) {   // 건너뛴 것부터 한 칸씩 되돌린다
     skipTo[open.id] -= 1; if (skipTo[open.id] <= k + 1) delete skipTo[open.id]; return renderHome();
   }
   if (k <= 0) return cancelTrip(id);
-  const [f, , short] = steps[k];
-  if (!confirm(`'${short} ${hhmm(new Date(open[f]))}' 기록을 지울까요?`)) return;
+  const st = steps[k], at = stepTimes(r, open)[k];
+  if (!confirm(`'${st.short} ${hhmm(new Date(at))}' 기록을 지울까요?`)) return;
   busyId = id; renderHome();
-  const { error } = await sb.from("trips").update({ [f]: null }).eq("id", open.id);
+  const field = compatOf(segsOf(r), st.seg, st.kind);
+  let error = null;
+  if (hasEvents()) ({ error } = await sb.from("trip_events").delete().eq("trip_id", open.id).eq("seg_index", st.seg).eq("kind", st.kind));
+  if (!error && field && open[field]) ({ error } = await sb.from("trips").update({ [field]: null }).eq("id", open.id));   // 옛 컬럼도 지워야 다시 안 보인다
   busyId = null;
   if (error) alert(error.message);
   await reloadTrips();
@@ -742,12 +813,12 @@ function openMenu(id) {
   let msg = `${r.arrive_by.slice(0,5)} 도착 목표 · ${daysLabel(r.active_days)}`;
   if (open) {
     const st = tripSteps(r)[nextIdx(r, open)];
-    msg = `이동 중 · 다음 단계: ${st[1]}`;
-    if (st[0] !== "ended_at") items.push(["건너뛰기", `skipStep(${id})`]);
+    msg = `이동 중 · 다음 단계: ${st.label}`;
+    if (st.kind !== "end") items.push(["건너뛰기", `skipStep(${id})`]);
     items.push(["되돌리기", `undoStep(${id})`]);
-    if (st[0] !== "ended_at") items.push(["바로 도착", `markField(${id},'ended_at')`]);
+    if (st.kind !== "end") items.push(["바로 도착", `markEnd(${id})`]);
     items.push(["진행 중 기록 삭제", `cancelTrip(${id})`, true]);
-  } else if (done) { msg = "오늘 기록 완료"; items.push(["새 기록 시작", `markField(${id},'started_at')`]); }
+  } else if (done) { msg = "오늘 기록 완료"; items.push(["새 기록 시작", `markStart(${id})`]); }
   items.push(["구간 수정", `openSegEdit(${id})`], ["알림 시간·신뢰 수준", "setTab('settings')"], ["경로 삭제", `deleteRoute(${id})`, true]);
   $("sheetTitle").textContent = r.name; $("sheetMsg").textContent = msg;
   $("sheetBody").innerHTML = items.map(([t, fn, bad]) => `<button class="act${bad ? " danger" : ""}" onclick="closeMenu();${fn}">${t}</button>`).join("");
@@ -879,7 +950,7 @@ function stepRail(steps) {
     const kind = stepKind(steps, i), p = partOf(kind, st.time, st.line, st.vehicleType);
     if (kind === "subway" || kind === "bus")
       return { color: p.color, title: `${chip(p)} ${stopHtml(withArs(st.from, st.arsId)) || ""} 승차`,
-               sub: `${stopHtml(withArs(st.to, st.arsIdTo)) || ""} 하차 · ${p.min}분` };
+               sub: `${stopHtml(withArs(st.to, st.arsIdTo)) || ""} 하차 · ${hopsTxt(kind, st.stops)}${p.min}분` };
     return { walk: true, title: kind === "transfer" ? "환승 도보" : i === 0 ? `${esc(found.from.name)}에서 도보` : "도보",
              sub: `${st.distance ? `${st.distance}m · ` : ""}${p.min}분${st.added ? ` <span class="est">(카카오 미제공 · 추정)</span>` : ""}` };   // added = route 함수가 붙인 도보
   }).concat([{ end: true, title: esc(found.to.name), sub: "도착" }]));
@@ -999,21 +1070,23 @@ async function saveRoute(i) {
     if (!m) return;
     asks.forEach((a, k) => { add[a.at] = m[k] * 60; });
   }
-  const walkRow = (sec, a, b) => ({ kind: "walk", station_from: a, station_to: b, line: null, updn: null, distance_m: null, expected_sec: sec });
+  const walkRow = (sec, a, b) => ({ kind: "walk", station_from: a, station_to: b, line: null, updn: null, distance_m: null, expected_sec: sec, stop_names: null });
   const { data: route, error } = await sb.from("routes").insert({ user_id: user.id,
     name: `${from} → ${to}`, arrive_by: $("rArrive").value || "09:00",
     active_days: daysStr(), baseline_sec: Math.round(r.totalTime) + add.start + add.end }).select().single();
   if (error) return alert(error.message);
   const rows = [...(add.start ? [walkRow(add.start, "집", from)] : []), ...segmentRows(r, route.id), ...(add.end ? [walkRow(add.end, to, "목적지")] : [])]
     .map((s, k) => ({ ...s, route_id: route.id, seq: k + 1 }));
-  const { error: e2 } = await sb.from("segments").insert(rows);
+  let { error: e2 } = await sb.from("segments").insert(rows);
+  if (e2 && /stop_names/.test(e2.message)) ({ error: e2 } = await sb.from("segments").insert(rows.map(({ stop_names, ...x }) => x)));   // 컬럼 추가 SQL 실행 전
   if (e2) return alert(e2.message);
   $("routeOptions").innerHTML = ""; $("findMsg").textContent = ""; $("rFrom").value = $("rTo").value = "";
   picked.from = picked.to = null; $("resControls").classList.add("hidden");
   await loadAll(); setTab("home"); toast("경로를 저장했어요");
   $("rc-" + route.id)?.scrollIntoView({ behavior:"smooth", block:"start" });
 }
-// 카카오 경로 하나 → segments 행들
+// 카카오 경로 하나 → segments 행들. 지하철·버스는 정거장 이름 목록(route steps[].stops)을 stop_names에 —
+// tick 하차 알림이 탄 차를 실시간으로 못 잡을 때 '탄 뒤 흐른 시간 ÷ 예상 × 정거장 수'로 추정한다
 function segmentRows(r, routeId) {
   return r.steps.map((st, idx) => {
     const kind = stepKind(r.steps, idx);
@@ -1022,7 +1095,8 @@ function segmentRows(r, routeId) {
     let line = st.line ?? null;
     if (kind === "bus") [sFrom, sTo, line] = busFields(st);
     return { route_id: routeId, seq: idx + 1, kind, station_from: sFrom, station_to: sTo, line, updn: null,
-      distance_m: st.distance || null, expected_sec: Math.round((kind === "walk" || kind === "transfer") ? walkSec : st.time) };
+      distance_m: st.distance || null, expected_sec: Math.round((kind === "walk" || kind === "transfer") ? walkSec : st.time),
+      stop_names: (kind === "subway" || kind === "bus") && Array.isArray(st.stops) && st.stops.length > 1 ? st.stops : null };
   });
 }
 // ---------- 구간 수정 (홈 ··· 메뉴) ----------
@@ -1041,6 +1115,7 @@ function segDraft(s) {
     if (d.fromNo && d.from === d.fromNo) d.from = ""; if (d.toNo && d.to === d.toNo) d.to = "";
   }
   d.min0 = d.min; d.dist0 = d.dist;
+  d.stops = s.stop_names; d.place0 = [s.kind, s.station_from, s.station_to].join("|");   // 정거장 목록은 역·정류장이 그대로일 때만 유지
   return d;
 }
 function segRow(d, i) {   // 초안 → segments 행
@@ -1058,6 +1133,7 @@ function segRow(d, i) {   // 초안 → segments 행
   if (minChanged) row.expected_sec = Number(d.min) > 0 ? Math.round(Number(d.min) * 60) : byDist;
   else if (distChanged && byDist) row.expected_sec = byDist;
   else row.expected_sec = d.sec ?? byDist;
+  if (Array.isArray(d.stops) && d.place0 !== [row.kind, row.station_from, row.station_to].join("|")) row.stop_names = null;
   return row;
 }
 function segHeadChip(d, i) { const p = partOf(d.kind, 0, segRow(d, i).line); return p.color ? chip(p) : `<b>${p.name}</b>`; }
@@ -1171,7 +1247,13 @@ async function segSave() {
 
 // ---------- 기록 ----------
 // 첫 화면 = 경로 리스트(전체 기록 + 경로별), 셀을 누르면 상세가 오른쪽에서 밀려 들어온다 (history.pushState → 뒤로가기·스와이프)
-const REC_STEPS = [["platform_at","승강장"], ["boarded_at","탑승"], ["transfer_off_at","환승 하차"], ["transfer_on_at","환승 탑승"]];
+// 기록 한 줄의 단계: '승강장 08:05 +6 · 인천1호선 탑승 08:09 +4 · 계양 하차 08:20 +11 …' (그 경로의 단계 목록 순서)
+function recStepsTxt(t) {
+  const r = routeById(t.route_id); if (!r) return "";
+  const times = stepTimes(r, t); let prev = t.started_at;
+  return tripSteps(r).map((st, i) => [st, times[i]]).filter(([st, at]) => at && st.kind !== "start" && st.kind !== "end")
+    .map(([st, at]) => { const g = mins(prev, at); prev = at; return `${esc(st.short)} ${hhmm(new Date(at))} +${g}`; }).join(" · ");
+}
 const REC_NOTE = "최근 60일 · 제외한 기록과 3분 미만·3시간 초과는 빼고 계산해요.";
 const DISC = `<svg class="disc" viewBox="0 0 24 24"><path d="m9 4.5 7.5 7.5L9 19.5"/></svg>`;
 let recView = null, recAnimBack = false, pushT;   // recView: null = 첫 화면, "all" = 전체 기록, 숫자 = 경로 id
@@ -1220,8 +1302,7 @@ function renderRecDetail() {
     const end = t.ended_at ? new Date(t.ended_at) : null;
     const total = end ? `${mins(d, end)}분` : Date.now() - d < OPEN_MS ? "이동 중" : "도착 기록 없음";
     const tag = !t.excluded && end && !inRange(t) ? `<span class="tag">계산 밖</span>` : "";
-    let prev = t.started_at;
-    const steps = REC_STEPS.filter(([f]) => t[f]).map(([f, n]) => { const g = mins(prev, t[f]); prev = t[f]; return `${n} ${hhmm(new Date(t[f]))} +${g}`; }).join(" · ");
+    const steps = recStepsTxt(t);
     html += `<div class="cell rec${t.excluded ? " off" : ""}">
       <div class="grow">${v === "all" ? `<div class="cap">${esc(routeById(t.route_id)?.name || "경로 없음")}</div>` : ""}
         <div class="rtime">${hhmm(d)} → ${end ? hhmm(end) : "—"}<b>${total}</b>${tag}</div>
@@ -1343,7 +1424,27 @@ function renderSettings() {
       <label class="cell"><span class="grow">첫 알림</span><select class="inline" onchange="saveRouteField(${r.id},'lead_min',this.value)">${opts(LEADS, r.lead_min ?? 30, v => `출발 ${v}분 전`)}</select></label>
       <label class="cell"><span class="grow">신뢰 수준</span><select class="inline" onchange="saveRouteField(${r.id},'confidence',this.value)">${opts(CONFS, r.confidence ?? 90, v => `${v}%`)}</select></label>
     </div>`).join("") : `<div class="group"><div class="cell sub">저장된 경로가 없어요.</div></div>`;
-  renderAuto();
+  renderAuto(); renderAlight();
+}
+// 하차 알림: users.alight_alerts = 켠 단계 '2,1,0' (2정거장 전 · 1정거장 전 · 도착). tick이 이 값을 보고 보낸다
+const ALIGHT = [[2, "2정거장 전", "2정거장 뒤 ○○ 하차"], [1, "1정거장 전", "다음 역 ○○, 내릴 준비"], [0, "도착", "○○ 도착 · 내리세요"]];
+const alightSet = v => new Set(String(v ?? "").split(/[^0-9]+/).filter(x => /^[012]$/.test(x)).map(Number));
+function renderAlight() {
+  const el = $("alightBody"); if (!el) return;
+  if (alightPref === undefined) { el.innerHTML = `<div class="group"><div class="cell sub">불러오는 중…</div></div>`; return; }
+  if (alightPref === false) { el.innerHTML = `<div class="group"><div class="cell sub">준비 중이에요 (DB 업데이트 뒤 켤 수 있어요). 지금은 세 단계 모두 보내요.</div></div>`; return; }
+  const on = alightSet(alightPref);
+  el.innerHTML = `<div class="group">${ALIGHT.map(([k, name, ex]) => `<div class="cell"><div class="grow">${name}<div class="cap">${ex}</div></div>
+      <button class="sw" role="switch" aria-checked="${on.has(k)}" aria-label="하차 알림 ${name}" onclick="toggleAlight(${k})"><span class="track"></span></button></div>`).join("")}</div>`;
+}
+async function toggleAlight(k) {
+  if (typeof alightPref !== "string") return;
+  const on = alightSet(alightPref), old = alightPref;
+  on.has(k) ? on.delete(k) : on.add(k);
+  alightPref = [2, 1, 0].filter(x => on.has(x)).join(","); renderAlight();   // 먼저 바꿔 보여주고, 실패하면 되돌린다
+  const { error } = await sb.from("users").update({ alight_alerts: alightPref }).eq("id", user.id);
+  if (error) { alightPref = old; renderAlight(); return alert("저장하지 못했어요: " + error.message); }
+  toast(on.size ? "하차 알림을 저장했어요" : "하차 알림을 모두 껐어요");
 }
 // 자동화 토큰: 아이폰 단축어·안드로이드 앱이 trip 함수로 trips에 기록할 때 쓰는 users.api_token (docs/shortcuts.md)
 const SHORTCUTS_DOC = "https://github.com/Beomjun-Kim07/TransFit/blob/main/docs/shortcuts.md";
@@ -1403,12 +1504,18 @@ async function saveRouteField(id, f, v) {
 }
 // 텔레그램
 const newCode = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, "0")).join("");
+const PROFILE_COLS = "telegram_chat_id, link_code, api_token";
+let profileCols = PROFILE_COLS + ", alight_alerts";
 async function profile() {
-  let { data, error } = await sb.from("users").select("telegram_chat_id, link_code, api_token").eq("id", user.id).maybeSingle();
+  let { data, error } = await sb.from("users").select(profileCols).eq("id", user.id).maybeSingle();
+  if (error && /alight_alerts/.test(error.message)) {   // users.alight_alerts 컬럼 추가 SQL 실행 전
+    profileCols = PROFILE_COLS;
+    ({ data, error } = await sb.from("users").select(profileCols).eq("id", user.id).maybeSingle());
+  }
   if (error) throw error;
   if (!data) {   // 가입 트리거보다 먼저 만든 계정: 행을 만든다 (routes 저장에도 필요)
     ({ data, error } = await sb.from("users").upsert({ id: user.id, email: user.email, link_code: newCode() })
-      .select("telegram_chat_id, link_code, api_token").single());
+      .select(profileCols).single());
     if (error) throw error;
   } else if (!data.telegram_chat_id && !data.link_code) {
     const code = newCode();
@@ -1425,10 +1532,12 @@ async function loadTelegram(manual) {
     $("tgBody").innerHTML = `<div class="group"><div class="cell"><span class="grow sub">상태를 못 불러왔어요: ${esc(e.message)}</span>
       <button id="tgRefresh" class="tbtn" onclick="loadTelegram(true)">다시 시도</button></div></div>`;
     if (apiToken === undefined) $("autoBody").innerHTML = `<div class="group"><div class="cell sub">토큰을 못 불러왔어요. 위 다시 시도를 눌러 주세요.</div></div>`;
+    if (alightPref === undefined) $("alightBody").innerHTML = `<div class="group"><div class="cell sub">설정을 못 불러왔어요. 위 다시 시도를 눌러 주세요.</div></div>`;
     return;
   }
   tgLinked = !!p.telegram_chat_id; renderHome();
   if (!reissuing) { apiToken = p.api_token || null; renderAuto(); }
+  alightPref = "alight_alerts" in p ? (p.alight_alerts ?? "2,1,0") : false; renderAlight();
   const checked = `<span class="cap">${hhmm(new Date())} 확인</span>`;
   if (tgLinked) {
     $("tgBody").innerHTML = `<div class="group"><div class="cell"><div class="grow">연결됨 <span class="accent">✓</span> ${checked}</div>

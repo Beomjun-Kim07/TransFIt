@@ -13,10 +13,21 @@
 // firstWalkSec(segments, trips, now) → { sec, n, personal }  출발 지점 → 첫 승차 지점 예상(초).
 //   trips의 started_at→platform_at(최근 60일, excluded 아님, 1~40분)이 3회 이상이면 중앙값, 아니면 첫 승차 전 구간 expected_sec 합.
 // boardingVehicle(seg, env) → { vehId? | trainNo? }  승차 지점에서 지금 도착 중이거나 가장 먼저 오는 차 (탈 방향만). 못 정하면 {}.
+//   opts.boarded(탑승 버튼을 누른 순간): 지하철은 승차역 도착(1)·출발(2)·진입(0) 열차를 먼저 고르고(4분 넘게 지난 자료는 빼고),
+//   그다음 2분 안에 오는 차만 받는다. 더 먼 차뿐이면 이미 탄 차가 목록에서 빠진 것 → {} (잘못 고르느니 비워 둔다).
 // rideEta(seg, ride, env) → { etaSec, source, rough? }  그 차가 하차 지점에 닿기까지 남은 초.
 //   지하철: 하차역 realtimeStationArrival에서 btrainNo == ride.trainNo 인 열차의 barvlDt. 버스: 하차 정류장 getStationByUid에서
 //   노선이 같고 vehId1/vehId2 == ride.vehId 인 항목의 traTime1/2. 이미 도착·통과면 0. 못 찾으면 { etaSec: null, source: 'none' }.
 //   (두 API 모두 정류장마다 다음 2대만 보여 줘서, 하차 지점이 멀고 사이에 같은 노선 차가 있으면 'none'.)
+// rideStops(seg, ride, env) → RideStops  탄 차가 하차 지점까지 몇 정거장 남았나 (하차 알림, _shared/alight.ts).
+//   away = 지하철식 셈: 0 진입·도착 / 1 전역(다음 역이 하차역) / 2 두 정거장 전 …
+//   지하철: arvlCd 0·1 → 0, 3·4·5(전역 출발·진입·도착) → 1, 그 밖엔 arvlMsg2 '[N]번째 전역' → N, 없으면 ordkey 3~5번째(남은 역 수).
+//           arvlCd 2(하차역 출발)면 source 'passed'.
+//   버스: arrmsg '곧 도착' → 1, '[N번째 전]' → N+1, 문구에 없으면 staOrd − sectOrd + 1.
+//         버스 'N번째 전'은 '하차 정류장 전에 아직 지나야 할 정류장 수'라 지하철보다 하나 작다 (2026-11-01 실제 응답:
+//         1132번 차 110052484가 sectOrd 28일 때 staOrd 28 정류장엔 '곧 도착', 33엔 '[5번째 전]'; 와우패션클럽 '곧 도착' 5초일 때
+//         바로 다음 롯데백화점노원점엔 '[1번째 전]'). 그래서 +1 해야 '다음 정류장이 하차' = 1이 된다.
+// subwayHeading(seg, env) → '장암 방면' | null  다음에 탈 지하철 방향 첫 열차의 종착역 (하차 알림의 환승 안내).
 // env: { SUBWAY_KEY, BUS_KEY } (+ 시험용 fetch·now, 로그 log). BUS_KEY는 공공데이터포털 인코딩 키·디코딩 키 둘 다 된다.
 
 export type Seg = {
@@ -29,11 +40,17 @@ export type Live = { line: string; waits: number[]; note?: string; rough?: boole
 export type ChainItem = Live & { index: number; kind: string; readyInSec: number; chain: string };
 export type Ride = { vehId?: string; trainNo?: string };
 export type RideEta = { etaSec: number | null; source: "live" | "none"; rough?: boolean };
+/** 하차 지점까지 남은 정거장. source 'live'면 away(모르면 null)·etaSec, 'passed'면 이미 지남, 'none'이면 실시간으로 못 잡음
+ *  (listed: 하차 지점 목록은 왔는데 그 차가 안 보임). ageSec = 실시간 자료가 만들어진 뒤 흐른 초. */
+export type RideStops = { source: "live" | "passed" | "none"; away?: number | null; etaSec?: number | null; code?: string;
+  msg?: string; ageSec?: number; listed?: boolean; reason?: string };
 export type TripRow = { started_at?: string | null; platform_at?: string | null; excluded?: boolean | null; [k: string]: unknown };
 
 export const REALTIME_HORIZON = 30 * 60;   // 실시간 API가 보여 주는 대략의 범위(초). 이보다 먼 뒤 구간은 조회 안 함
 export const SEC_PER_STATION = 120;        // 남은 시간 없이 역 수만 올 때 역당 추정 초
 export const WALK_DAYS = 60, WALK_MIN_SEC = 60, WALK_MAX_SEC = 40 * 60, WALK_MIN_TRIPS = 3;   // 개인 첫 도보 (watch.py와 같은 값)
+export const BOARDED_MAX_SEC = 120;        // 탑승 버튼 순간: 이보다 늦게 오는 차는 '내가 탄 차'로 안 본다
+export const BOARDED_STALE_SEC = 4 * 60;   // 탑승 버튼 순간: 도착·출발 표시가 이보다 오래된 자료면 안 믿는다
 const LINE_ID: Record<string, string> = {
   "1호선": "1001", "2호선": "1002", "3호선": "1003", "4호선": "1004", "5호선": "1005",
   "6호선": "1006", "7호선": "1007", "8호선": "1008", "9호선": "1009",
@@ -45,6 +62,7 @@ const LOOP2: [number, number] = [1002000201, 1002000243];   // 2호선 본선 �
 const MIN_SEC_RE = /(\d+)\s*분(?:\s*(\d+)\s*초)?/;           // '6분 30초 후', '2분12초후[1번째 전]'
 const TLN_RE = /^\s*(.+?)행\s*-\s*(.+?)방면/;                 // '성수행 - 홍대입구방면' → (종착, 다음 역)
 const STATIONS_AWAY_RE = /\[(\d+)\]번째 전역/;                 // '[14]번째 전역 (안양)'
+const BUS_AHEAD_RE = /\[(\d+)번째\s*전\]/;                    // '12분후[4번째 전]'
 const BUS_LINE_RE = /^\s*(.*?)\s*\((.*)\)\s*$/;              // '1142 (노원역1번출구→노원구청)'
 const BUS_BASE = "http://ws.bus.go.kr/api/rest";
 const BUS_SERVICE: Record<string, string> = { stationinfo: "정류소정보조회", arrive: "버스도착정보조회" };
@@ -115,7 +133,7 @@ export function busLabel(seg: Seg) {
 }
 export const segLabel = (seg: Seg) => seg.kind === "bus" ? busLabel(seg) : lineLabel(seg.line);
 /** 승차 지점 이름 (체인 문구용): 지하철 '노원역', 버스는 line 괄호의 승차 정류장 이름. */
-function placeOf(seg: Seg) {
+export function placeOf(seg: Seg) {
   if (seg.kind === "subway") return `${normStation(seg.station_from)}역`;
   const m = BUS_LINE_RE.exec(seg.line ?? "");
   return (m ? m[2].split("→")[0] : stopName(seg.station_from)) || seg.station_from || "정류장";
@@ -419,24 +437,37 @@ const sameTrainNo = (x: unknown, y: unknown) => {
 const hasKey = (seg: Seg, env: Env) => !!(seg.kind === "subway" ? env.SUBWAY_KEY : env.BUS_KEY);
 
 /** 탈 차 정하기: 승차 지점에서 지금 도착 중(진입·도착)이거나 가장 먼저 오는 차. 방향·정류장 고르기는 liveForSegment와 같다.
- *  지하철 { trainNo } (btrainNo), 버스 { vehId } (vehId1/2). 방향 미확정·정보 없음·실패면 {}. 이미 떠난 차(출발)는 안 고른다. */
-export async function boardingVehicle(seg: Seg, env: Env): Promise<Ride> {
+ *  지하철 { trainNo } (btrainNo), 버스 { vehId } (vehId1/2). 방향 미확정·정보 없음·실패면 {}. 이미 떠난 차(출발)는 안 고른다.
+ *  opts.boarded = 탑승 버튼을 누른 순간: 지하철은 승차역 도착(1) → 출발(2, 방금 탄 차가 떠남) → 진입(0) 순으로 먼저 보고,
+ *  그 밖엔 2분(BOARDED_MAX_SEC) 안에 오는 차만. 더 먼 차뿐이면 탄 차가 이미 목록에서 빠진 것이라 {}. */
+export async function boardingVehicle(seg: Seg, env: Env, opts: { boarded?: boolean } = {}): Promise<Ride> {
   if (!isRide(seg) || !hasKey(seg, env)) return {};
   const c = ctxOf(env);
   try {
     if (seg.kind === "subway") {
       const { arr, bIds, trains } = await subwayDir(c, seg);
       if (!arr.length || trains === null) return {};
-      const t = timedTrains(dropShortTurn(trains, bIds), c.now).find(([, a]) => String(a.btrainNo ?? "").trim());
+      const cand = dropShortTurn(trains, bIds).filter((a) => String(a.btrainNo ?? "").trim());
+      if (opts.boarded) {
+        const fresh = cand.filter((a) => ageSec(a.recptnDt, c.now) <= BOARDED_STALE_SEC);
+        const at = (cd: string) => fresh.find((a) => String(a.arvlCd ?? "") === cd);
+        const here = at("1") ?? at("2") ?? at("0");
+        if (here) { c.log(`      탄 열차 ${here.btrainNo} ${here.trainLineNm} (${here.arvlMsg2 ?? ""})`); return { trainNo: String(here.btrainNo).trim() }; }
+      }
+      const t = timedTrains(cand, c.now)[0];
       if (!t) return {};
+      if (opts.boarded && t[0] > BOARDED_MAX_SEC) { c.log(`      탄 열차 못 정함: 가장 빠른 열차도 ${t[0]}초 뒤`); return {}; }
       c.log(`      탈 열차 ${t[1].btrainNo} ${t[1].trainLineNm} ${t[0]}초 (${t[1].arvlMsg2 ?? ""})`);
       return { trainNo: String(t[1].btrainNo).trim() };
     }
     const cands = (await busPicked(c, seg))
-      .flatMap((e) => ([1, 2] as const).map((n) => ({ eta: busEta(e, n, c.now), veh: vehOf(e, n), e })))
-      .filter((x): x is { eta: number; veh: string; e: A } => x.eta !== null && !!x.veh)
+      .flatMap((e) => ([1, 2] as const).map((n) => ({ eta: busEta(e, n, c.now), veh: vehOf(e, n), e, n })))
+      .filter((x): x is { eta: number; veh: string; e: A; n: 1 | 2 } => x.eta !== null && !!x.veh)
       .sort((x, y) => x.eta - y.eta);
     if (!cands.length) return {};
+    if (opts.boarded && cands[0].eta > BOARDED_MAX_SEC && busAway(cands[0].e, cands[0].n) !== 1) {   // '곧 도착'은 traTime이 2분 넘어도 받음
+      c.log(`      탄 버스 못 정함: 가장 빠른 버스도 ${cands[0].eta}초 뒤`); return {};
+    }
     c.log(`      탈 버스 ${cands[0].e.rtNm} vehId=${cands[0].veh} ${cands[0].eta}초`);
     return { vehId: cands[0].veh };
   } catch (e) {
@@ -473,6 +504,77 @@ export async function rideEta(seg: Seg, ride: Ride, env: Env): Promise<RideEta> 
   } catch (e) {
     c.log(`    ${seg.kind} 하차 도착 조회 실패: ${redact(String(e), env)}`);
     return none;
+  }
+}
+
+// ---------- 하차 알림: 탄 차가 하차 지점까지 몇 정거장 ----------
+/** 지하철 도착 목록 한 항목 → 이 역까지 남은 정거장 (지하철식). 하차역 출발(2)은 호출하는 쪽이 따로 본다. 모르면 null. */
+export function subwayAway(a: A): number | null {
+  const cd = String(a.arvlCd ?? "");
+  if (cd === "0" || cd === "1") return 0;                     // 진입·도착
+  if (cd === "3" || cd === "4" || cd === "5") return 1;       // 전역 출발·진입·도착 = 다음 역이 여기
+  const n = STATIONS_AWAY_RE.exec(String(a.arvlMsg2 ?? ""));  // '[2]번째 전역 (월계)'
+  if (n) return toInt(n[1]);
+  const ord = String(a.ordkey ?? "").slice(2, 5);             // '01002도봉산0' → 002 (남은 역 수)
+  return /^\d{3}$/.test(ord) ? toInt(ord) : null;
+}
+/** 버스 n번째 도착 예정 차 → 이 정류장까지 남은 정거장 (지하철식). '곧 도착' = 1, '[N번째 전]' = N+1. 모르면 null. */
+export function busAway(it: A, n: 1 | 2): number | null {
+  const msg = String(it[`arrmsg${n}`] ?? "");
+  if (msg.includes("곧 도착")) return 1;
+  const m = BUS_AHEAD_RE.exec(msg);
+  if (m) return toInt(m[1]) + 1;
+  const st = toInt(it.staOrd), sec = toInt(it[`sectOrd${n}`]);
+  return st > 0 && sec > 0 && st >= sec ? st - sec + 1 : null;
+}
+/** 탄 차(ride)가 하차 지점(station_to)까지 몇 정거장 남았나. 실시간으로 못 잡으면 source 'none' (이유는 reason). */
+export async function rideStops(seg: Seg, ride: Ride, env: Env): Promise<RideStops> {
+  if (!isRide(seg) || !seg.station_to) return { source: "none", reason: "하차 지점 정보 없음" };
+  const id = seg.kind === "subway" ? ride.trainNo : ride.vehId;
+  if (!id) return { source: "none", reason: seg.kind === "subway" ? "탄 열차 번호 없음" : "탄 버스 번호 없음" };
+  if (!hasKey(seg, env)) return { source: "none", reason: "실시간 키 없음" };
+  const c = ctxOf(env);
+  try {
+    if (seg.kind === "subway") {
+      const [name, arr] = await stationArrivals(c, seg.station_to, lineId(seg.line));
+      if (!arr.length) return { source: "none", reason: `하차역 ${name || seg.station_to} 실시간 없음` };   // 인천 1호선 등
+      const a = arr.find((x) => sameTrainNo(x.btrainNo, id));
+      if (!a) return { source: "none", listed: true, reason: `하차역 ${name}에 열차 ${id} 안 보임` };
+      const code = String(a.arvlCd ?? ""), ageS = ageSec(a.recptnDt, c.now), msg = String(a.arvlMsg2 ?? "");
+      c.log(`    하차역 ${name}: 열차 ${id} ${msg} (arvlCd ${code}, ${ageS}초 전 자료)`);
+      if (code === "2") return { source: "passed", code, msg, ageSec: ageS };
+      return { source: "live", away: subwayAway(a), etaSec: subwayEta(a, c.now), code, msg, ageSec: ageS };
+    }
+    const entries = await routeEntries(c, seg.station_to, seg.line);
+    if (!entries.length) return { source: "none", reason: `하차 정류장 ${seg.station_to}에 ${busLabel(seg)} 실시간 없음` };
+    for (const it of entries) {
+      for (const n of [1, 2] as const) {
+        if (vehOf(it, n) !== id) continue;
+        const msg = String(it[`arrmsg${n}`] ?? "");
+        c.log(`    하차 정류장 ${it.stNm}(${it.arsId}): 버스 ${id} ${msg}`);
+        return { source: "live", away: busAway(it, n), etaSec: busEta(it, n, c.now), msg, ageSec: ageSec(it.mkTm, c.now) };
+      }
+    }
+    return { source: "none", listed: true, reason: `하차 정류장 ${seg.station_to}에 버스 ${id} 안 보임` };
+  } catch (e) {
+    c.log(`    ${seg.kind} 하차 정거장 조회 실패: ${redact(String(e), env)}`);
+    return { source: "none", reason: "실시간 조회 실패" };
+  }
+}
+/** 다음에 탈 지하철 방향의 첫 열차 종착역 → '장암 방면'. 방향을 못 정하거나 열차가 없으면 null. */
+export async function subwayHeading(seg: Seg, env: Env): Promise<string | null> {
+  if (seg.kind !== "subway" || !env.SUBWAY_KEY) return null;
+  const c = ctxOf(env);
+  try {
+    const { arr, bIds, trains } = await subwayDir(c, seg);
+    if (!arr.length || trains === null) return null;
+    const cand = dropShortTurn(trains, bIds);
+    const first = timedTrains(cand, c.now)[0]?.[1] ?? cand[0];
+    const term = first ? parseTln(first)[0] : "";
+    return term ? `${term} 방면` : null;
+  } catch (e) {
+    c.log(`    다음 열차 방면 조회 실패: ${redact(String(e), env)}`);
+    return null;
   }
 }
 

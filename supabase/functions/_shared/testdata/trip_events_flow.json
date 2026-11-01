@@ -1,0 +1,31 @@
+{
+  "note": "환승 2번 경로(인천1호선 → 공항철도 → 4호선)를 버튼으로 끝까지 누른 기록. steps_test.ts가 presses를 recordEvent로 넣어 trips 행이 expected_columns가 되는지 보고, test_watch.py는 그 행으로 watch.py·report.py·개인 첫 도보가 그대로 도는지 본다.",
+  "segments": [
+    { "seq": 1, "kind": "walk", "station_from": "집", "station_to": "작전역", "expected_sec": 420 },
+    { "seq": 2, "kind": "subway", "station_from": "작전역", "station_to": "계양역", "line": "인천1호선", "expected_sec": 300, "stop_names": ["작전", "경인교대입구", "계산", "임학", "계양"] },
+    { "seq": 3, "kind": "transfer", "station_from": "계양", "station_to": "계양", "expected_sec": 240 },
+    { "seq": 4, "kind": "subway", "station_from": "계양역", "station_to": "서울역", "line": "공항철도", "expected_sec": 1500 },
+    { "seq": 5, "kind": "transfer", "station_from": "서울역", "station_to": "서울역", "expected_sec": 300 },
+    { "seq": 6, "kind": "subway", "station_from": "서울역 4호선", "station_to": "혜화역", "line": "수도권 4호선", "expected_sec": 900 },
+    { "seq": 7, "kind": "walk", "station_from": "혜화역", "station_to": "학교", "expected_sec": 360 }
+  ],
+  "route": { "id": 9, "name": "작전 → 혜화", "arrive_by": "09:00:00", "confidence": 90, "baseline_sec": 4020, "fallback_min": 40 },
+  "trip": { "id": 77, "route_id": 9, "started_at": "2026-11-01T07:30:00+09:00", "excluded": false },
+  "presses": [
+    { "seg_index": 1, "kind": "platform", "at": "2026-11-01T07:37:00+09:00", "label": "작전 승강장 도착" },
+    { "seg_index": 1, "kind": "board",    "at": "2026-11-01T07:39:00+09:00", "label": "인천1호선 탑승" },
+    { "seg_index": 1, "kind": "alight",   "at": "2026-11-01T07:44:00+09:00", "label": "계양 하차" },
+    { "seg_index": 3, "kind": "board",    "at": "2026-11-01T07:48:00+09:00", "label": "공항철도 탑승" },
+    { "seg_index": 3, "kind": "alight",   "at": "2026-11-01T08:14:00+09:00", "label": "서울역 하차" },
+    { "seg_index": 5, "kind": "board",    "at": "2026-11-01T08:19:00+09:00", "label": "4호선 탑승" },
+    { "kind": "end", "at": "2026-11-01T08:36:00+09:00", "label": "목적지 도착" }
+  ],
+  "expected_columns": {
+    "platform_at": "2026-11-01T07:37:00+09:00",
+    "boarded_at": "2026-11-01T07:39:00+09:00",
+    "transfer_off_at": "2026-11-01T07:44:00+09:00",
+    "transfer_on_at": "2026-11-01T07:48:00+09:00",
+    "ended_at": "2026-11-01T08:36:00+09:00"
+  },
+  "expected_events": 6
+}

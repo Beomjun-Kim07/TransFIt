@@ -1,10 +1,14 @@
 // 이동 중 안내 메시지 — tick(매분 고쳐 쓰기)과 telegram(버튼 누르면 즉시 고쳐 쓰기)이 같이 쓴다.
-// 단계: started만 → 승차 지점으로 이동 중 / platform_at → 승강장 대기 / boarded_at → 탑승 중
-//       transfer_off_at → 환승 이동 / transfer_on_at → 두 번째 탑승 중
+// 단계: 경로 segments에서 만든 목록(_shared/steps.ts) — 출발 → 첫 탈것 승강장 도착 → 탑승 → 하차 → 다음 탑승 … → 목적지 도착.
+//   환승 횟수 제한 없음. 진행 상황 = trip_events(+옛 컬럼)에서 마지막으로 찍힌 단계: 승차 지점으로 이동 중 / 승강장 대기 /
+//   '공항철도 탑승 중' / 환승 이동. 버튼 = 다음 단계·그다음(건너뛰기) + 목적지 도착 (trip:ev:<trip>:<seg>:<kind>).
 // 도착 예상 = 지금 + 남은 구간 예상 합 + 실시간 대기(_shared/realtime.ts liveChain). 목표 대비 빠름/늦음.
+// 탑승 중이면 하차 지점까지 남은 정거장 한 줄 (_shared/alight.ts alightLine: '🚏 노원 하차까지 3정거장').
 
 import { liveChain, liveLineText, isRide, segLabel, lineLabel, busLabel, stopName, normStation, REALTIME_HORIZON,
   type Seg, type ChainItem, type Env } from "./realtime.ts";
+import { alightState, alightLine, type AlightState } from "./alight.ts";
+import { progress, buttonSteps, stepCallback, rideIndexes, rideName, type Progress } from "./steps.ts";
 
 export type Trip = Record<string, any>;           // trips 행 + routes(name, arrive_by, …) + users(telegram_chat_id)
 export type Markup = { inline_keyboard: { text: string; callback_data: string }[][] };
@@ -71,63 +75,51 @@ export function segSummary(s: Seg): string | null {
 }
 
 // ---------- 단계 ----------
-export const STAGE = ["승차 지점으로 이동 중", "승강장 대기", "탑승 중", "환승 이동", "두 번째 탑승 중"];
-const STAGE_ICON = ["🚶", "🚉", "🚇", "🔄", "🚇"];
-export const TRIP_FIELDS = ["platform_at", "boarded_at", "transfer_off_at", "transfer_on_at", "ended_at"] as const;
-export type Field = typeof TRIP_FIELDS[number];
-export const stageOf = (t: Trip) => t.transfer_on_at ? 4 : t.transfer_off_at ? 3 : t.boarded_at ? 2 : t.platform_at ? 1 : 0;
-
-/** 버튼 문구: 다음 탈 구간 종류에 맞게. 버스면 정류장/버스, 지하철이면 승강장/열차. */
-export function fieldLabel(f: Field, segments: Seg[]): string {
-  const rides = segments.filter(isRide);
-  const k = (i: number) => rides[i]?.kind ?? "subway";
-  const bus = (i: number) => k(i) === "bus";
-  switch (f) {
-    case "platform_at": return bus(0) ? "정류장 도착" : "승강장 도착";
-    case "boarded_at": return bus(0) ? "버스 탑승" : "열차 탑승";
-    case "transfer_off_at": return bus(0) ? "환승 하차(버스)" : "환승 하차";
-    case "transfer_on_at": return bus(1) ? "환승 탑승(버스)" : "환승 탑승";
-    case "ended_at": return "목적지 도착";
-  }
+/** 상태 한 줄: '🚶 승차 지점으로 이동 중', '🚉 승강장 대기', '🚇 공항철도 탑승 중', '🔄 환승 이동 · 다음 4호선'. */
+export function stageText(p: Progress, segments: Seg[]): string {
+  const seg = segments[p.seg];
+  if (p.state === "walk") return "🚶 승차 지점으로 이동 중";
+  if (p.state === "platform") return seg?.kind === "bus" ? "🚏 정류장 대기" : "🚉 승강장 대기";
+  if (p.state === "ride") return `${seg?.kind === "bus" ? "🚌" : "🚇"} ${seg ? rideName(seg) : ""} 탑승 중`.replace("  ", " ");
+  if (p.state === "transfer") { const nx = rideIndexes(segments).find((i) => i > p.seg); return `🔄 환승 이동${nx !== undefined ? ` · 다음 ${rideName(segments[nx])}` : ""}`; }
+  return "🏁 도착";
 }
-/** 다음 단계 버튼: 안 누른 것만, 환승 없는 경로는 환승 버튼 숨김. */
-export function buttons(t: Trip, segments: Seg[]): Markup {
-  const rides = segments.filter(isRide).length;
-  const fields = TRIP_FIELDS.filter((f) => !t[f] && (rides >= 2 || !f.startsWith("transfer_")));
-  return { inline_keyboard: fields.map((f) => [{ text: fieldLabel(f, segments), callback_data: `trip:${f}:${t.id}` }]) };
+/** 다음 단계 버튼: 다음 단계와 그다음(건너뛰기) 중 안 찍힌 것 + 목적지 도착. 콜백 trip:ev:<trip>:<seg>:<kind> / trip:ended_at:<trip>. */
+export function buttons(t: Trip, segments: Seg[], p: Progress = progress(t, segments)): Markup {
+  return { inline_keyboard: buttonSteps(p).map((s) => [{ text: s.label, callback_data: stepCallback(t.id, s) }]) };
 }
 
-/** 단계에 따라 (다음 탈 구간 index, 그 승차 지점까지 남은 초 pre, 그 구간부터 끝까지 예상 합 post, 탈 구간 없을 때 남은 초) */
-export function position(t: Trip, segments: Seg[], now: Date) {
-  const rides = segments.map((s, i) => isRide(s) ? i : -1).filter((i) => i >= 0);
+/** 진행 상황에 따라 (다음 탈 구간 index, 그 승차 지점까지 남은 초 pre, 그 구간부터 끝까지 예상 합 post, 탈 구간 없을 때 남은 초) */
+export function position(t: Trip, segments: Seg[], now: Date, p: Progress = progress(t, segments)) {
+  const rides = rideIndexes(segments);
   const sum = (a: number, b: number) => segments.slice(a, b).reduce((x, s) => x + (s.expected_sec || 0), 0);
   const sec = (i: number) => segments[i]?.expected_sec || 0;
-  const n = segments.length, [r1, r2, r3] = rides;
-  const stage = stageOf(t);
-  const none = (remaining: number) => ({ stage, next: -1, pre: 0, post: 0, remaining });
-  if (r1 === undefined) return none(Math.max(0, sum(0, n) - since(t.started_at, now)));
-  if (stage === 0) return { stage, next: r1, pre: Math.max(0, sum(0, r1) - since(t.started_at, now)), post: sum(r1, n), remaining: 0 };
-  if (stage === 1) return { stage, next: r1, pre: 0, post: sum(r1, n), remaining: 0 };
-  if (stage === 2) {
-    const partial = Math.max(0, sec(r1) - since(t.boarded_at, now));
-    if (r2 === undefined) return none(partial + sum(r1 + 1, n));
-    return { stage, next: r2, pre: partial + sum(r1 + 1, r2), post: sum(r2, n), remaining: 0 };
+  const n = segments.length, state = p.state;
+  const none = (remaining: number) => ({ state, next: -1, pre: 0, post: 0, remaining });
+  const after = (i: number) => rides.find((r) => r > i);
+  if (!rides.length || state === "done") return none(state === "done" ? 0 : Math.max(0, sum(0, n) - since(t.started_at, now)));
+  if (state === "walk") return { state, next: rides[0], pre: Math.max(0, sum(0, rides[0]) - since(t.started_at, now)), post: sum(rides[0], n), remaining: 0 };
+  if (state === "platform") return { state, next: p.seg, pre: 0, post: sum(p.seg, n), remaining: 0 };
+  const nx = after(p.seg);
+  if (state === "ride") {
+    const partial = Math.max(0, sec(p.seg) - since(p.since, now));
+    if (nx === undefined) return none(partial + sum(p.seg + 1, n));
+    return { state, next: nx, pre: partial + sum(p.seg + 1, nx), post: sum(nx, n), remaining: 0 };
   }
-  if (stage === 3) {
-    if (r2 === undefined) return none(Math.max(0, sum(r1 + 1, n) - since(t.transfer_off_at, now)));
-    return { stage, next: r2, pre: Math.max(0, sum(r1 + 1, r2) - since(t.transfer_off_at, now)), post: sum(r2, n), remaining: 0 };
-  }
-  const cur = r2 ?? r1, nxt = r2 !== undefined ? r3 : undefined;
-  const partial = Math.max(0, sec(cur) - since(t.transfer_on_at, now));
-  if (nxt === undefined) return none(partial + sum(cur + 1, n));
-  return { stage, next: nxt, pre: partial + sum(cur + 1, nxt), post: sum(nxt, n), remaining: 0 };
+  if (nx === undefined) return none(Math.max(0, sum(p.seg + 1, n) - since(p.since, now)));   // transfer
+  return { state, next: nx, pre: Math.max(0, sum(p.seg + 1, nx) - since(p.since, now)), post: sum(nx, n), remaining: 0 };
 }
 
 // ---------- 메시지 ----------
-/** 이동 중 메시지. live = 실시간 체인 결과를 주입(tick은 캐시를 끼움), 없으면 직접 조회. */
-export async function liveMessage(t: Trip, segments: Seg[], env: Env, live?: (fromIndex: number, walkSec: number) => Promise<ChainItem[]>) {
+/** 이동 중 메시지. live = 실시간 체인 결과를 주입(tick은 캐시를 끼움), 없으면 직접 조회.
+ *  alight = 하차 상태(tick이 알림과 같이 쓰려고 미리 구한 것). undefined면 탑승 중일 때 직접 구하고, null이면 그 줄 없음. */
+export async function liveMessage(t: Trip, segments: Seg[], env: Env, live?: (fromIndex: number, walkSec: number) => Promise<ChainItem[]>,
+                                  alight?: AlightState | null) {
   const now = env.now ?? new Date();
-  const route = t.routes, p = position(t, segments, now);
+  if (alight === undefined) {
+    try { alight = await alightState(t, segments, { ...env, now }); } catch (e) { console.error("alight", String(e)); alight = null; }
+  }
+  const route = t.routes, prog = progress(t, segments), p = position(t, segments, now, prog);
   let liveLine = "", remaining = p.remaining, waitNote = "";
   if (p.next >= 0) {
     const seg = segments[p.next], icon = seg.kind === "bus" ? "🚌" : "🚇";
@@ -150,14 +142,12 @@ export async function liveMessage(t: Trip, segments: Seg[], env: Env, live?: (fr
     const diff = Math.round((target.getTime() - eta.getTime()) / 60000);
     vs = ` · 목표 ${hhmm(target)} 대비 ${diff > 0 ? `${diff}분 빠름` : diff < 0 ? `${-diff}분 늦음` : "정시"}`;
   }
-  const rides = segments.filter(isRide);
-  const curRide = p.stage === 2 ? rides[0] : p.stage === 4 ? (rides[1] ?? rides[0]) : null;
-  const icon = curRide ? (curRide.kind === "bus" ? "🚌" : "🚇") : STAGE_ICON[p.stage];
   const text = [`🧭 이동 중 · ${route.name}`,
-    `${icon} ${STAGE[p.stage]} · 출발 ${hhmm(new Date(t.started_at))} (${mins(since(t.started_at, now))}분 경과)`,
+    `${stageText(prog, segments)} · 출발 ${hhmm(new Date(t.started_at))} (${mins(since(t.started_at, now))}분 경과)`,
+    alightLine(alight),
     liveLine,
     `도착 예상 ${hhmm(eta)}${vs} (남은 약 ${mins(remaining)}분${waitNote})`].filter(Boolean).join("\n");
-  return { text, markup: buttons(t, segments) };
+  return { text, markup: buttons(t, segments, prog) };
 }
 
 /** 도착 메시지: "🏁 도착 · 총 N분 (예상 M분)". expectedSec = trips.expected_sec 또는 추정값 */

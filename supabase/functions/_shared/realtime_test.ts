@@ -2,7 +2,7 @@
 // 실행: deno test --allow-net --allow-read --allow-env supabase/functions/_shared/realtime_test.ts
 // 앞부분은 가짜 데이터(네트워크 없음). '실제 API' 시험은 .env.local(또는 환경변수)에 SUBWAY_KEY·BUS_KEY가 있을 때만 돌고, 키는 출력하지 않는다.
 import {
-  boardingVehicle, busEta, busLabel, busStopIds, type ChainItem, dropShortTurn, type Env, firstWalkSec, idDist, isRough, lineId, lineLabel, liveChain,
+  boardingVehicle, busEta, busLabel, busStopIds, type ChainItem, dropShortTurn, type Env, firstWalkSec, idDist, isRough, lineId, lineLabel, liveChain, rideStops,
   liveForSegment, liveLineText, liveText, normStation, personalWalkSec, pickBusStop, pickDirection, redact, rideEta, routeMatch, sameStation,
   type Seg, SEC_PER_STATION, stopName, subwayEta, timedTrains, type TripRow,
 } from "./realtime.ts";
@@ -354,5 +354,20 @@ Deno.test({ name: "실제 API: 탈 차 정하고 하차 지점 도착 예상 (�
     const eta = await rideEta(seg, ride, REAL);
     console.log(`  ${name}: 탈 차 ${JSON.stringify(ride)} → 하차 지점 ${JSON.stringify(eta)}`);
     ok(eta.source === "none" ? eta.etaSec === null : (eta.etaSec ?? -1) >= 0, `${name}: ${JSON.stringify(eta)}`);
+  }
+} });
+
+Deno.test({ name: "실제 API: 탄 차 → 하차 지점까지 정거장 (rideStops, 시각마다 다름 — 실패 없이 도는지만)", ignore: !REAL.SUBWAY_KEY || !REAL.BUS_KEY, fn: async () => {
+  const cases: [string, Seg][] = [
+    ["4호선 노원→창동", S("노원역", "창동역", "4호선")],
+    ["7호선 노원→수락산", S("노원역", "수락산역", "7호선")],
+    ["1호선 창동→도봉산", S("창동역", "도봉산역", "1호선")],
+    ["버스 1132 11354→11212", B("11354", "11212", "1132 (중계주공10단지.중계건영3차아파트→롯데백화점노원점.노원역4번출구)")],
+  ];
+  for (const [name, seg] of cases) {
+    const ride = await boardingVehicle(seg, REAL);                    // 지금 오는 차를 탔다고 치고
+    const st = await rideStops(seg, ride, REAL);
+    console.log(`  ${name}: 탈 차 ${JSON.stringify(ride)} → ${st.source} away=${st.away ?? "-"} ${st.msg ?? st.reason ?? ""}`);
+    ok(["live", "none", "passed"].includes(st.source) && (st.source !== "live" || st.away === null || (st.away ?? -1) >= 0), `${name}: ${JSON.stringify(st)}`);
   }
 } });

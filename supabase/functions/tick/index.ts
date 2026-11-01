@@ -1,16 +1,22 @@
 // Supabase Edge Function: tick — 이동 중 안내. pg_cron이 매분 호출한다 (GitHub Actions 안 씀).
 //
-// 대상: 오늘(KST) 시작했고 ended_at이 없고 excluded가 아니며 시작 후 3시간 이내인 trips.
+// 대상: 오늘(KST) 시작했고 ended_at이 없고 excluded가 아니며 시작 후 3시간 이내인 trips. 단계는 trip_events(+옛 컬럼)로 본다.
 // 메시지 내용·단계·버튼은 _shared/trip_message.ts (telegram 함수와 공유), 실시간은 _shared/realtime.ts.
 // 텔레그램은 trip당 메시지 하나: telegram 함수가 start 때 보내고 live_msg_id에 저장 → tick은 고쳐 쓰기만
 // (live_msg_id가 없으면 한 번 보내고 저장). 내용이 같으면 안 고친다.
 // ended_at이 생기면 "🏁 도착 · 총 N분 (예상 M분)"으로 마지막 수정 후 live_msg_id=null.
 // 실시간 API는 trip당 1분에 1회 이하 (인스턴스 메모리 캐시).
+// 하차 알림(_shared/alight.ts): 탑승 중이면 하차 지점(환승역·정류장, 최종 하차)까지 남은 정거장을 보고 2정거장 전·1정거장 전·도착에
+// sendMessage로 새 메시지를 보낸다 (editMessageText는 푸시가 안 울려서). 지금 단계 하나만 — 2에서 0으로 건너뛰면 0만.
+// 중복 방지는 notifications와 같은 방식: trip_alerts(trip_id, seg_index, kind)에 ignore-duplicates로 먼저 넣고, 응답이 비면 안 보냄,
+// 발송이 실패하면 그 행을 지운다. users.alight_alerts('2,1,0')로 단계별 끄기.
 //
 // 호출: POST /tick  (Authorization: Bearer <service_role 또는 sb_secret_ 키>)   ?dry=1 이면 보내지 않고 내용을 응답으로.
 
 import { liveChain, type Seg, type ChainItem } from "../_shared/realtime.ts";
-import { liveMessage, finalMessage, estimateDuration, stageOf, STAGE, dayStartKst, hhmm, LOOKBACK_DAYS, type Trip, type Markup } from "../_shared/trip_message.ts";
+import { liveMessage, finalMessage, estimateDuration, stageText, dayStartKst, hhmm, LOOKBACK_DAYS, type Trip, type Markup } from "../_shared/trip_message.ts";
+import { progress, EVENTS_EMBED } from "../_shared/steps.ts";
+import { alightState, alightMessage, alertPrefs, pickAlert, type AlightState, type LastLive } from "../_shared/alight.ts";
 
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
 const SUBWAY_KEY = Deno.env.get("SUBWAY_KEY") ?? "";
@@ -26,10 +32,10 @@ const GH_WORKFLOW = Deno.env.get("GH_WORKFLOW") ?? "watch.yml";
 const DISPATCH_GAP_SEC = 4 * 60;          // 한 번 깨운 뒤 4분 안엔 다시 안 깨움 (dispatch_log)
 const LIVE_WINDOW_MIN = 10;               // watch.py LIVE_WINDOW_MIN
 
-async function db(method: string, path: string, body?: unknown) {
+async function db(method: string, path: string, body?: unknown, prefer = "return=representation") {
   const r = await fetch(`${SB_URL}/rest/v1/${path}`, {
     method,
-    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json", Prefer: "return=representation" },
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json", Prefer: prefer },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`db ${method} ${path.split("?")[0]} ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -52,6 +58,44 @@ function cachedLive(tripId: number, segments: Seg[], now: Date) {
     liveCache.set(tripId, { at: now.getTime(), segIdx: fromIndex, items });
     return items;
   };
+}
+
+// ---------- 하차 알림 ----------
+// 하차 상태: trip당 1분에 1회 이하 (단계·탄 차가 바뀌면 다시). lastLive = 구간별 마지막 실시간 level ('지남' 판단용, 인스턴스 메모리).
+const alightCache = new Map<number, { at: number; key: string; st: AlightState | null }>();
+const lastLive = new Map<string, LastLive>();
+async function alightFor(t: Trip, segments: Seg[], now: Date) {
+  const key = JSON.stringify([t.trip_events ?? null, t.platform_at, t.boarded_at, t.transfer_off_at, t.transfer_on_at, t.ride_train, t.ride_veh]);
+  const c = alightCache.get(t.id);
+  if (c && c.key === key && now.getTime() - c.at < 55_000) return c.st;
+  const st = await alightState(t, segments, { SUBWAY_KEY, BUS_KEY, now }, { lastLive: (i) => lastLive.get(`${t.id}:${i}`) });
+  if (st?.source === "live" && st.level !== null) lastLive.set(`${t.id}:${st.index}`, { level: st.level, at: now.getTime() });
+  alightCache.set(t.id, { at: now.getTime(), key, st });
+  return st;
+}
+/** 보낼 단계가 있으면 trip_alerts에 먼저 넣고(유니크 충돌이면 빈 응답 → 안 보냄) sendMessage. 발송 실패면 행을 지운다. */
+async function sendAlight(t: Trip, segments: Seg[], st: AlightState, chatId: number | null, dry: boolean, now: Date) {
+  const rec: any = { seg: st.index, level: st.level, source: st.source };
+  if (st.live?.msg) rec.live = st.live.msg;
+  if (st.live?.reason) rec.why = st.live.reason;
+  if (st.note) rec.note = st.note;
+  if (st.level === null || st.level > 2) return rec;
+  const prefs = alertPrefs(t.users?.alight_alerts);
+  if (!prefs.has(st.level)) { rec.action = "꺼 둔 단계"; return rec; }
+  const sent = (await db("GET", `trip_alerts?trip_id=eq.${t.id}&seg_index=eq.${st.index}&select=kind`)).map((r: any) => Number(r.kind));
+  const kind = pickAlert(st.level, prefs, sent);
+  if (kind === null) { rec.action = "이미 보냄"; return rec; }
+  rec.kind = kind;
+  rec.text = await alightMessage(segments, st.index, kind, { SUBWAY_KEY, BUS_KEY, now }, { estimated: st.source === "estimate" });
+  if (dry) { rec.action = "dry"; return rec; }
+  if (!chatId) { rec.action = "텔레그램 미연결"; return rec; }
+  const [row] = await db("POST", "trip_alerts?on_conflict=trip_id,seg_index,kind",
+    { trip_id: t.id, seg_index: st.index, kind: String(kind), source: st.source }, "resolution=ignore-duplicates,return=representation");
+  if (!row) { rec.action = "다른 실행이 먼저 넣음 — 안 보냄"; return rec; }
+  try { await tg("sendMessage", { chat_id: chatId, text: rec.text }); }
+  catch (e) { await db("DELETE", `trip_alerts?id=eq.${row.id}`).catch(() => {}); throw e; }
+  rec.action = "sent";
+  return rec;
 }
 
 // 메시지 고쳐 쓰기. 내용이 같으면 안 고친다. live_msg_id가 없으면(telegram 함수가 못 보낸 경우) 한 번 보낸다.
@@ -136,7 +180,20 @@ async function wakeGithub(now: Date, dry: boolean) {
   return rec;
 }
 
-const SELECT = "*,routes(id,name,arrive_by,confidence,baseline_sec,fallback_min),users(telegram_chat_id)";
+// trips + 경로 + 사용자(알림 설정) + trip_events. SQL 실행 전이면 없는 것(alight_alerts·trip_events)을 빼고 다시 읽는다.
+const ROUTES = "routes(id,name,arrive_by,confidence,baseline_sec,fallback_min)";
+let users = "users(telegram_chat_id,alight_alerts)", events = `,${EVENTS_EMBED}`;
+async function tripsWhere(q: string) {
+  for (let i = 0; ; i++) {
+    try { return await db("GET", `trips?select=*,${ROUTES},${users}${events}&${q}`); }
+    catch (e) {
+      const m = String(e);
+      if (i < 2 && events && m.includes("trip_events")) { events = ""; continue; }
+      if (i < 2 && users.includes("alight_alerts") && m.includes("alight_alerts")) { users = "users(telegram_chat_id)"; continue; }
+      throw e;
+    }
+  }
+}
 Deno.serve(async (req) => {
   if (!authorized(req)) return new Response(JSON.stringify({ error: "service_role 키가 필요해요" }), { status: 401 });
   const dry = new URL(req.url).searchParams.get("dry") === "1";
@@ -145,22 +202,29 @@ Deno.serve(async (req) => {
   const startFloor = new Date(Math.max(dayStartKst(now).getTime(), now.getTime() - MAX_TRIP_SEC * 1000)).toISOString();
 
   // 1) 진행 중
-  const open = await db("GET", `trips?select=${SELECT}&ended_at=is.null&excluded=not.is.true&started_at=gte.${encodeURIComponent(startFloor)}&order=id`);
+  const open = await tripsWhere(`ended_at=is.null&excluded=not.is.true&started_at=gte.${encodeURIComponent(startFloor)}&order=id`);
   for (const t of open) {
     const chatId = t.users?.telegram_chat_id;
-    const rec: any = { trip_id: t.id, route: t.routes?.name, stage: STAGE[stageOf(t)] };
+    const rec: any = { trip_id: t.id, route: t.routes?.name };
     try {
       if (!t.routes) throw new Error("경로 없음");
       const segments: Seg[] = await db("GET", `segments?route_id=eq.${t.route_id}&order=seq`);
-      const { text, markup } = await liveMessage(t, segments, { SUBWAY_KEY, BUS_KEY, now }, cachedLive(t.id, segments, now));
+      rec.stage = stageText(progress(t, segments), segments);
+      let st: AlightState | null = null;
+      try { st = await alightFor(t, segments, now); } catch (e) { rec.alight = { error: String(e) }; }
+      const { text, markup } = await liveMessage(t, segments, { SUBWAY_KEY, BUS_KEY, now }, cachedLive(t.id, segments, now), st);
       rec.text = text; rec.buttons = markup.inline_keyboard.map((r) => r[0].text);
       rec.action = dry ? "dry" : !chatId ? "텔레그램 미연결" : await upsertMessage(t, chatId, text, markup);
+      if (st) {   // 하차 알림 (카드 고쳐 쓰기와 따로 — 실패해도 카드는 그대로)
+        try { rec.alight = await sendAlight(t, segments, st, chatId, dry, now); }
+        catch (e) { rec.alight = { seg: st.index, level: st.level, error: String(e) }; console.error(`trip ${t.id} alight`, String(e)); }
+      }
     } catch (e) { rec.error = String(e); console.error(`trip ${t.id}`, String(e)); }
     out.push(rec);
   }
   // 2) 끝난 것 마무리 (메시지가 있던 것만)
   let ended: any[] = [];
-  try { ended = await db("GET", `trips?select=${SELECT}&ended_at=not.is.null&live_msg_id=not.is.null&order=id`); }
+  try { ended = await tripsWhere("ended_at=not.is.null&live_msg_id=not.is.null&order=id"); }
   catch (e) { out.push({ error: `live_msg_id 조회 실패 (컬럼 없음?) ${String(e)}` }); }
   for (const t of ended) {
     const chatId = t.users?.telegram_chat_id;
@@ -182,7 +246,7 @@ Deno.serve(async (req) => {
           catch (e) { if (!String(e).includes("not modified") && !String(e).includes("not found")) throw e; }
         }
         await db("PATCH", `trips?id=eq.${t.id}`, { live_msg_id: null });
-        liveCache.delete(t.id); lastText.delete(t.id);
+        liveCache.delete(t.id); lastText.delete(t.id); alightCache.delete(t.id);
         rec.action = "finalized";
       }
     } catch (e) { rec.error = String(e); console.error(`trip ${t.id} final`, String(e)); }
