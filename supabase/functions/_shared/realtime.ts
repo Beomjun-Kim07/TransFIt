@@ -9,6 +9,11 @@
 //   note : 대기 대신 보일 말 ('열차 정보 없음', '보이는 열차는 놓칠 듯 · 다음 열차 기준', '운행종료', '방향 미확정' …). 탈 구간이 아니면 null.
 //   rough: 남은 시간을 역 수로 추정(코레일 구간) → 문구에 '약'.  ways: 방향 미확정이면 방향별, 버스 후보가 여럿이면 버스별 { line, waits }.
 // liveChain(segments, fromIndex, walkSec, env) → ChainItem[]  (walkSec = 지금부터 segments[fromIndex] 시작점에 닿기까지 남은 초)
+// boardingVehicle(seg, env) → { vehId? | trainNo? }  승차 지점에서 지금 도착 중이거나 가장 먼저 오는 차 (탈 방향만). 못 정하면 {}.
+// rideEta(seg, ride, env) → { etaSec, source, rough? }  그 차가 하차 지점에 닿기까지 남은 초.
+//   지하철: 하차역 realtimeStationArrival에서 btrainNo == ride.trainNo 인 열차의 barvlDt. 버스: 하차 정류장 getStationByUid에서
+//   노선이 같고 vehId1/vehId2 == ride.vehId 인 항목의 traTime1/2. 이미 도착·통과면 0. 못 찾으면 { etaSec: null, source: 'none' }.
+//   (두 API 모두 정류장마다 다음 2대만 보여 줘서, 하차 지점이 멀고 사이에 같은 노선 차가 있으면 'none'.)
 // env: { SUBWAY_KEY, BUS_KEY } (+ 시험용 fetch·now, 로그 log). BUS_KEY는 공공데이터포털 인코딩 키·디코딩 키 둘 다 된다.
 
 export type Seg = {
@@ -19,6 +24,8 @@ export type Env = { SUBWAY_KEY?: string; BUS_KEY?: string; fetch?: typeof fetch;
 export type Way = { line: string; waits: number[] };
 export type Live = { line: string; waits: number[]; note?: string; rough?: boolean; ways?: Way[] };
 export type ChainItem = Live & { index: number; kind: string; readyInSec: number; chain: string };
+export type Ride = { vehId?: string; trainNo?: string };
+export type RideEta = { etaSec: number | null; source: "live" | "none"; rough?: boolean };
 
 export const REALTIME_HORIZON = 30 * 60;   // 실시간 API가 보여 주는 대략의 범위(초). 이보다 먼 뒤 구간은 조회 안 함
 export const SEC_PER_STATION = 120;        // 남은 시간 없이 역 수만 올 때 역당 추정 초
@@ -223,7 +230,8 @@ export function dropShortTurn(trains: A[], bIds: Record<string, number>) {
   }
   return keep;
 }
-async function subwayLive(c: Ctx, seg: Seg, ready: number): Promise<Live> {
+/** 승차역 도착 목록(arr)과 그중 도착역 쪽 열차(trains, 방향 미확정이면 null). subwayLive·boardingVehicle 공통. */
+async function subwayDir(c: Ctx, seg: Seg): Promise<{ line: string; arr: A[]; bIds: Record<string, number>; trains: A[] | null }> {
   const lid = lineId(seg.line);
   let [aName, arr] = await stationArrivals(c, seg.station_from, lid);
   const [bName, bArr] = seg.station_to ? await stationArrivals(c, seg.station_to, lid) : ["", [] as A[]];
@@ -233,14 +241,17 @@ async function subwayLive(c: Ctx, seg: Seg, ready: number): Promise<Live> {
   }
   const bIds = stationIds(bArr);
   const line = lineLabel(seg.line, lid || (arr[0]?.subwayId ?? ""));
-  if (!arr.length) return { line, waits: [], note: "열차 정보 없음" };
-
+  if (!arr.length) return { line, arr, bIds, trains: null };
   let trains: A[] | null, basis: string;
   if (seg.updn) {   // updnLine은 상행/하행/내선/외선 — '내선순환', '상행선'처럼 적어도 맞게
     trains = arr.filter((a) => String(seg.updn).includes(a.updnLine || "?")); basis = `저장된 방향 ${seg.updn}`;
   } else [trains, basis] = pickDirection(arr, bName, bIds);
   c.log(`    지하철 ${aName}→${bName || "?"} ${seg.line ?? ""}: 방향 근거 = ${basis}`);
-
+  return { line, arr, bIds, trains };
+}
+async function subwayLive(c: Ctx, seg: Seg, ready: number): Promise<Live> {
+  const { line, arr, bIds, trains } = await subwayDir(c, seg);
+  if (!arr.length) return { line, waits: [], note: "열차 정보 없음" };
   if (trains === null) {                                      // 방향 미확정 → 방향마다 (섞어서 틀린 열차를 고르지 않게)
     const groups = new Map<string, A[]>();
     for (const a of dropShortTurn(arr, bIds)) {
@@ -292,9 +303,9 @@ export function routeMatch(rtNm?: string | null, line?: string | null) {
   toks.add(normStop(line).replace(/번+$/, ""));
   return !!rt && toks.has(rt);
 }
-/** 승차 정류장 번호(arsId) 후보 묶음 [[이름이 정확히 같은 곳], [나머지 검색 결과]]. station_from에 5자리 번호가 있으면 그것 하나. */
-export async function busStopIds(seg: Seg, env: Env): Promise<string[][]> {
-  const s = (seg.station_from ?? "").trim();
+/** 정류장 번호(arsId) 후보 묶음 [[이름이 정확히 같은 곳], [나머지 검색 결과]]. 5자리 번호가 있으면 그것 하나. */
+async function stopIdGroups(stop: string | null | undefined, env: Env): Promise<string[][]> {
+  const s = (stop ?? "").trim();
   const m = /(?<!\d)(\d{5})(?!\d)/.exec(s);
   if (m) return [[m[1]]];
   if (!s) return [];
@@ -302,6 +313,19 @@ export async function busStopIds(seg: Seg, env: Env): Promise<string[][]> {
   const exact: string[] = items.filter((it) => sameStop(it.stNm, s)).map((it) => it.arsId);
   const rest: string[] = items.map((it) => it.arsId).filter((id: string) => !exact.includes(id));
   return [exact, rest.slice(0, 10)];
+}
+/** 승차 정류장(station_from) 번호 후보 묶음. */
+export const busStopIds = (seg: Seg, env: Env) => stopIdGroups(seg.station_from, env);
+/** 그 정류장의 getStationByUid 항목 중 이 노선만. 이름이면 정확히 같은 곳부터, 그 노선이 없으면 나머지 후보. */
+async function routeEntries(c: Ctx, stop: string | null | undefined, line: string | null | undefined): Promise<A[]> {
+  for (const group of await stopIdGroups(stop, c.env)) {
+    const entries: A[] = [];
+    for (const ars of group) {
+      entries.push(...(await busGet(c, "stationinfo/getStationByUid", { arsId: ars })).filter((it) => routeMatch(it.rtNm, line)));
+    }
+    if (entries.length) return entries;
+  }
+  return [];
 }
 /** n번째(1·2) 도착 예정 버스까지 남은 초. 운행 전·종료면 null. getStationByUid는 traTime{n}만 준다 (exps{n}은 예비). */
 export function busEta(it: A, n: 1 | 2, now: Date): number | null {
@@ -336,16 +360,10 @@ export async function pickBusStop(entries: A[], seg: Seg, env: Env): Promise<[A[
   }
   return best ? [[best[1]], "노선 정류장 순서"] : [entries, "방향 판정 실패"];
 }
-async function busLive(c: Ctx, seg: Seg, ready: number): Promise<Live> {
-  let entries: A[] = [];
-  for (const group of await busStopIds(seg, c.env)) {        // 이름 정확히 같은 정류장부터, 그 노선이 없으면 나머지 후보
-    entries = [];
-    for (const ars of group) {
-      entries.push(...(await busGet(c, "stationinfo/getStationByUid", { arsId: ars })).filter((it) => routeMatch(it.rtNm, seg.line)));
-    }
-    if (entries.length) break;
-  }
-  if (!entries.length) return { line: busLabel(seg), waits: [], note: "버스 정보 없음" };
+/** 승차 정류장에서 탈 쪽 항목(들). 그 노선이 안 보이면 []. busLive·boardingVehicle 공통. */
+async function busPicked(c: Ctx, seg: Seg): Promise<A[]> {
+  const entries = await routeEntries(c, seg.station_from, seg.line);
+  if (!entries.length) return [];
   let picked: A[], basis: string;
   if (seg.line) [picked, basis] = await pickBusStop(entries, seg, c.env);
   else {                                                      // 노선을 모르면 그 정류장 버스 중 빨리 오는 3개
@@ -353,6 +371,11 @@ async function busLive(c: Ctx, seg: Seg, ready: number): Promise<Live> {
     picked = [...entries].sort((a, b) => soon(a) - soon(b)).slice(0, 3); basis = "노선 미지정";
   }
   c.log(`    버스 ${seg.station_from}→${seg.station_to ?? "?"} ${seg.line ?? ""}: 정류장 근거 = ${basis}`);
+  return picked;
+}
+async function busLive(c: Ctx, seg: Seg, ready: number): Promise<Live> {
+  const picked = await busPicked(c, seg);
+  if (!picked.length) return { line: busLabel(seg), waits: [], note: "버스 정보 없음" };
   const res: Live[] = picked.map((e) => {
     c.log(`      ${e.rtNm} ${e.stNm}(${e.arsId}) ${e.adirection}방향 vehId1=${e.vehId1} traTime1=${e.traTime1} (${e.arrmsg1})`);
     const line = (e.rtNm ? `${e.rtNm}번` : busLabel(seg)) + (picked.length > 1 && e.adirection ? `(${e.adirection} 방향)` : "");
@@ -378,6 +401,73 @@ export async function liveForSegment(seg: Seg, readyInSec: number, env: Env): Pr
   } catch (e) {
     c.log(`    ${seg.kind} 실시간 실패: ${redact(String(e), env)}`);
     return { line: segLabel(seg), waits: [], note: "실시간 조회 실패" };
+  }
+}
+
+/** n번째 도착 버스의 차량 ID ('0'·빈 값은 없음). */
+const vehOf = (it: A, n: 1 | 2) => { const v = String(it[`vehId${n}`] ?? "").trim(); return v && v !== "0" ? v : ""; };
+/** 열차 번호 비교 ('0447' == '447'). */
+const sameTrainNo = (x: unknown, y: unknown) => {
+  const a = String(x ?? "").trim(), b = String(y ?? "").trim();
+  return !!a && !!b && (a === b || (/^\d+$/.test(a) && /^\d+$/.test(b) && +a === +b));
+};
+const hasKey = (seg: Seg, env: Env) => !!(seg.kind === "subway" ? env.SUBWAY_KEY : env.BUS_KEY);
+
+/** 탈 차 정하기: 승차 지점에서 지금 도착 중(진입·도착)이거나 가장 먼저 오는 차. 방향·정류장 고르기는 liveForSegment와 같다.
+ *  지하철 { trainNo } (btrainNo), 버스 { vehId } (vehId1/2). 방향 미확정·정보 없음·실패면 {}. 이미 떠난 차(출발)는 안 고른다. */
+export async function boardingVehicle(seg: Seg, env: Env): Promise<Ride> {
+  if (!isRide(seg) || !hasKey(seg, env)) return {};
+  const c = ctxOf(env);
+  try {
+    if (seg.kind === "subway") {
+      const { arr, bIds, trains } = await subwayDir(c, seg);
+      if (!arr.length || trains === null) return {};
+      const t = timedTrains(dropShortTurn(trains, bIds), c.now).find(([, a]) => String(a.btrainNo ?? "").trim());
+      if (!t) return {};
+      c.log(`      탈 열차 ${t[1].btrainNo} ${t[1].trainLineNm} ${t[0]}초 (${t[1].arvlMsg2 ?? ""})`);
+      return { trainNo: String(t[1].btrainNo).trim() };
+    }
+    const cands = (await busPicked(c, seg))
+      .flatMap((e) => ([1, 2] as const).map((n) => ({ eta: busEta(e, n, c.now), veh: vehOf(e, n), e })))
+      .filter((x): x is { eta: number; veh: string; e: A } => x.eta !== null && !!x.veh)
+      .sort((x, y) => x.eta - y.eta);
+    if (!cands.length) return {};
+    c.log(`      탈 버스 ${cands[0].e.rtNm} vehId=${cands[0].veh} ${cands[0].eta}초`);
+    return { vehId: cands[0].veh };
+  } catch (e) {
+    c.log(`    ${seg.kind} 탈 차 조회 실패: ${redact(String(e), env)}`);
+    return {};
+  }
+}
+
+/** 탄 차가 하차 지점(station_to)에 닿기까지 남은 초 (지금부터). 이미 도착·통과면 0. 못 찾으면 { etaSec: null, source: 'none' }. */
+export async function rideEta(seg: Seg, ride: Ride, env: Env): Promise<RideEta> {
+  const none: RideEta = { etaSec: null, source: "none" };
+  const id = seg.kind === "subway" ? ride.trainNo : ride.vehId;
+  if (!isRide(seg) || !seg.station_to || !id || !hasKey(seg, env)) return none;
+  const c = ctxOf(env);
+  try {
+    if (seg.kind === "subway") {
+      const [name, arr] = await stationArrivals(c, seg.station_to, lineId(seg.line));
+      const a = arr.find((x) => sameTrainNo(x.btrainNo, id));
+      if (!a) { c.log(`    하차역 ${name}: 열차 ${id} 안 보임`); return none; }
+      if (String(a.arvlCd ?? "") === "2") return { etaSec: 0, source: "live" };   // 하차역 출발 = 이미 지남
+      const eta = subwayEta(a, c.now);
+      if (eta === null) return none;
+      return { etaSec: Math.max(0, eta), source: "live", ...(isRough(a) ? { rough: true } : {}) };
+    }
+    for (const it of await routeEntries(c, seg.station_to, seg.line)) {
+      for (const n of [1, 2] as const) {
+        if (vehOf(it, n) !== id) continue;
+        const eta = busEta(it, n, c.now);
+        if (eta !== null) return { etaSec: Math.max(0, eta), source: "live" };
+      }
+    }
+    c.log(`    하차 정류장 ${seg.station_to}: 버스 ${id} 안 보임`);
+    return none;
+  } catch (e) {
+    c.log(`    ${seg.kind} 하차 도착 조회 실패: ${redact(String(e), env)}`);
+    return none;
   }
 }
 

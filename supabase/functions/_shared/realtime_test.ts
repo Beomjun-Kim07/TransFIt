@@ -2,8 +2,8 @@
 // 실행: deno test --allow-net --allow-read --allow-env supabase/functions/_shared/realtime_test.ts
 // 앞부분은 가짜 데이터(네트워크 없음). '실제 API' 시험은 .env.local(또는 환경변수)에 SUBWAY_KEY·BUS_KEY가 있을 때만 돌고, 키는 출력하지 않는다.
 import {
-  busEta, busLabel, busStopIds, type ChainItem, dropShortTurn, type Env, idDist, isRough, lineId, lineLabel, liveChain,
-  liveForSegment, liveLineText, liveText, normStation, pickBusStop, pickDirection, redact, routeMatch, sameStation,
+  boardingVehicle, busEta, busLabel, busStopIds, type ChainItem, dropShortTurn, type Env, idDist, isRough, lineId, lineLabel, liveChain,
+  liveForSegment, liveLineText, liveText, normStation, pickBusStop, pickDirection, redact, rideEta, routeMatch, sameStation,
   type Seg, SEC_PER_STATION, stopName, subwayEta, timedTrains,
 } from "./realtime.ts";
 
@@ -22,8 +22,8 @@ function tr(sid: string, upd: string, tln: string, cur: number, nxt: number, ter
   return { subwayId: sid, updnLine: upd, trainLineNm: tln, statnId: String(cur), statnTid: String(nxt), bstatnId: String(term),
     bstatnNm: tln.split("행")[0], barvlDt: bar, arvlCd: "99", arvlMsg2: "", btrainNo: no, recptnDt: "" };
 }
-// 가짜 fetch: 지하철 역 이름 → 도착 목록, 버스 arsId → getStationByUid 항목
-function fakeFetch(subway: Record<string, A[]>, bus: Record<string, A[]> = {}, fail = ""): typeof fetch {
+// 가짜 fetch: 지하철 역 이름 → 도착 목록, 버스 arsId → getStationByUid 항목, 정류장 이름 → getStationByName 항목
+function fakeFetch(subway: Record<string, A[]>, bus: Record<string, A[]> = {}, fail = "", byName: Record<string, A[]> = {}): typeof fetch {
   return ((input: string | URL | Request) => {
     const url = String(input);
     if (fail) return Promise.reject(new TypeError(`error sending request for url (${url}): ${fail}`));
@@ -35,6 +35,8 @@ function fakeFetch(subway: Record<string, A[]>, bus: Record<string, A[]> = {}, f
       body = { realtimeArrivalList: Object.keys(subway).map((statnNm) => ({ statnNm })) };
     } else if (url.includes("stationinfo/getStationByUid")) {
       body = { msgHeader: { headerCd: "0" }, msgBody: { itemList: bus[new URL(url).searchParams.get("arsId") ?? ""] ?? [] } };
+    } else if (url.includes("stationinfo/getStationByName")) {
+      body = { msgHeader: { headerCd: "0" }, msgBody: { itemList: byName[new URL(url).searchParams.get("stSrch") ?? ""] ?? [] } };
     } else body = { msgHeader: { headerCd: "4" }, msgBody: { itemList: [] } };
     return Promise.resolve(new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } }));
   }) as typeof fetch;
@@ -189,6 +191,77 @@ Deno.test("liveChain: fromIndex·walkSec — 이동 중 (노원역까지 2분 �
   eq(await liveChain([{ kind: "walk", expected_sec: 600 }], 0, 0, fakeEnv(fakeFetch({}))), [], "탈 구간 없으면 빈 목록");
 });
 
+// ---------- boardingVehicle / rideEta (가짜 fetch) ----------
+const SEG_NS: Seg = { kind: "subway", station_from: "노원역", station_to: "사당역", line: "수도권 4호선" };
+
+Deno.test("boardingVehicle: 지하철 — 도착 중이거나 가장 먼저 오는 열차 (반대 방향·회차·떠난 열차 제외)", async () => {
+  eq(await boardingVehicle(SEG_NS, fakeEnv(fakeFetch({ 노원: NOWON, 사당: SADANG }))), { trainNo: "a" }, "가장 먼저 오는 200초 열차");
+  const arriving = { ...tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, "0", "now"), arvlCd: "1", arvlMsg2: "노원 도착" };
+  const gone = { ...tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, "0", "gone"), arvlCd: "2", arvlMsg2: "노원 출발" };
+  eq(await boardingVehicle(SEG_NS, fakeEnv(fakeFetch({ 노원: [gone, ...NOWON, arriving], 사당: SADANG }))), { trainNo: "now" }, "지금 도착 중(떠난 열차 말고)");
+  const tricky = [tr("1004", "상행", "진접행 - 상계방면", 1004000411, 1004000410, 1004000405, "50", "반대"),
+                  tr("1004", "하행", "한성대입구행 - 창동방면", 1004000411, 1004000412, 1004000418, "100", "회차"),
+                  tr("1004", "하행", "오이도행 - 창동방면", 1004000411, 1004000412, 1004000456, "760", "c")];
+  eq(await boardingVehicle(SEG_NS, fakeEnv(fakeFetch({ 노원: tricky, 사당: SADANG }))), { trainNo: "c" }, "반대 방향·회차 열차는 안 고름");
+  const isu = [tr("1007", "상행", "장암행 - 내방방면", 1007000736, 1007000735, 1007000709, "300", "x"),
+               tr("1007", "하행", "석남행 - 남성방면", 1007000736, 1007000737, 1007000753, "500", "y")];
+  eq(await boardingVehicle({ kind: "subway", station_from: "이수역", station_to: "없는역", line: "7호선" }, fakeEnv(fakeFetch({ "총신대입구(이수)": isu }))), {}, "방향 미확정이면 {}");
+  eq(await boardingVehicle({ kind: "walk", expected_sec: 60 }, fakeEnv(fakeFetch({}))), {}, "탈 구간 아니면 {}");
+  eq(await boardingVehicle(SEG_NS, { ...fakeEnv(fakeFetch({ 노원: NOWON })), SUBWAY_KEY: "" }), {}, "키 없으면 {}");
+});
+
+const BUS_V = { ...BUS_NOW, vehId1: "v1", vehId2: "v2" };   // 1132번: v1 428초, v2 900초 뒤
+Deno.test("boardingVehicle: 버스 — 가장 먼저 오는 차의 vehId", async () => {
+  eq(await boardingVehicle(ROUTE5[0], fakeEnv(fakeFetch({}, { "11354": [BUS_V] }))), { vehId: "v1" });
+  const soon = { ...BUS_V, traTime1: "0", arrmsg1: "곧 도착" };
+  eq(await boardingVehicle(ROUTE5[0], fakeEnv(fakeFetch({}, { "11354": [soon] }))), { vehId: "v1" }, "곧 도착(traTime 0)도 지금 오는 차");
+  const other = { rtNm: "1130", stNm: BUS_NOW.stNm, arsId: "11354", traTime1: "100", arrmsg1: "2분후", vehId1: "w1", vehId2: "0" };
+  eq(await boardingVehicle({ kind: "bus", station_from: "11354", station_to: "11213", line: null }, fakeEnv(fakeFetch({}, { "11354": [BUS_V, other] }))),
+     { vehId: "w1" }, "노선을 모르면 그 정류장에서 제일 먼저 오는 버스");
+  eq(await boardingVehicle(ROUTE5[0], fakeEnv(fakeFetch({}, { "11354": [{ ...BUS_V, traTime1: "0", arrmsg1: "운행종료", traTime2: "0", arrmsg2: "운행종료" }] }))), {}, "운행종료면 {}");
+});
+
+Deno.test("rideEta: 지하철 — 하차역 도착 목록에서 같은 열차 번호의 barvlDt", async () => {
+  const sadang = [tr("1004", "하행", "오이도행 - 남태령방면", 1004000433, 1004000434, 1004000456, "300", "x"),
+                  tr("1004", "하행", "오이도행 - 남태령방면", 1004000433, 1004000434, 1004000456, "1500", "447"),
+                  tr("1004", "상행", "진접행 - 총신대입구(이수)방면", 1004000433, 1004000432, 1004000405, "200", "9999")];
+  const env = fakeEnv(fakeFetch({ 사당: sadang }));
+  eq(await rideEta(SEG_NS, { trainNo: "447" }, env), { etaSec: 1500, source: "live" });
+  eq(await rideEta(SEG_NS, { trainNo: "0447" }, env), { etaSec: 1500, source: "live" }, "앞자리 0 무시");
+  eq(await rideEta(SEG_NS, { trainNo: "1234" }, env), { etaSec: null, source: "none" }, "안 보이면 none");
+  eq(await rideEta(SEG_NS, { vehId: "447" }, env), { etaSec: null, source: "none" }, "지하철에 trainNo 없으면 none");
+  eq(await rideEta({ ...SEG_NS, station_to: null }, { trainNo: "447" }, env), { etaSec: null, source: "none" }, "하차역 없으면 none");
+  const passed = { ...sadang[1], barvlDt: "0", arvlCd: "2", arvlMsg2: "사당 출발" };
+  eq(await rideEta(SEG_NS, { trainNo: "447" }, fakeEnv(fakeFetch({ 사당: [passed] }))), { etaSec: 0, source: "live" }, "하차역을 이미 지났으면 0");
+  const korail = { ...sadang[1], barvlDt: "0", arvlCd: "99", arvlMsg2: "[3]번째 전역 (이촌)" };
+  eq(await rideEta(SEG_NS, { trainNo: "447" }, fakeEnv(fakeFetch({ 사당: [korail] }))), { etaSec: 3 * SEC_PER_STATION, source: "live", rough: true }, "barvlDt 0이면 역 수로 추정, rough");
+});
+
+Deno.test("rideEta: 버스 — 하차 정류장에서 같은 노선·같은 vehId의 traTime", async () => {
+  const alight = [{ rtNm: "1130", arsId: "11213", vehId1: "v1", traTime1: "5", arrmsg1: "곧 도착" },              // 다른 노선은 안 봄
+                  { rtNm: "1132", arsId: "11213", vehId1: "x9", traTime1: "60", arrmsg1: "1분후[1번째 전]", vehId2: "v1", traTime2: "509", arrmsg2: "8분후[5번째 전]" }];
+  const env = fakeEnv(fakeFetch({}, { "11213": alight }, "", { 와우패션클럽: [{ arsId: "11213", stNm: "와우패션클럽" }] }));
+  eq(await rideEta(ROUTE5[0], { vehId: "v1" }, env), { etaSec: 509, source: "live" }, "traTime2 = 509초");
+  eq(await rideEta(ROUTE5[0], { vehId: "x9" }, env), { etaSec: 60, source: "live" }, "traTime1");
+  eq(await rideEta(ROUTE5[0], { vehId: "zz" }, env), { etaSec: null, source: "none" }, "안 보이면 none");
+  eq(await rideEta({ ...ROUTE5[0], station_to: "와우패션클럽" }, { vehId: "v1" }, env), { etaSec: 509, source: "live" }, "하차 정류장이 이름이어도 찾음");
+  eq(await rideEta(ROUTE5[0], { trainNo: "v1" }, env), { etaSec: null, source: "none" }, "버스에 vehId 없으면 none");
+  // 탈 때 정한 차를 그대로 하차 지점에서 따라감 (boardingVehicle → rideEta)
+  const env2 = fakeEnv(fakeFetch({}, { "11354": [BUS_V], "11213": alight.map((a) => ({ ...a })) }));
+  const ride = await boardingVehicle(ROUTE5[0], env2);
+  eq([ride, await rideEta(ROUTE5[0], ride, env2)], [{ vehId: "v1" }, { etaSec: 509, source: "live" }], "boardingVehicle → rideEta");
+});
+
+Deno.test("boardingVehicle·rideEta: 실패하면 {}·none, 로그에 키가 안 남음", async () => {
+  const logs: string[] = [];
+  const env: Env = { SUBWAY_KEY: "SECRET-SUBWAY-KEY", BUS_KEY: "a%2Bb%3D", fetch: fakeFetch({}, {}, "connection refused"), now, log: (m) => logs.push(m) };
+  eq(await boardingVehicle(SEG_NS, env), {});
+  eq(await boardingVehicle(ROUTE5[0], env), {});
+  eq(await rideEta(SEG_NS, { trainNo: "447" }, env), { etaSec: null, source: "none" });
+  eq(await rideEta(ROUTE5[0], { vehId: "v1" }, env), { etaSec: null, source: "none" });
+  ok(logs.length === 4 && logs.every((l) => !l.includes("SECRET-SUBWAY-KEY") && !l.includes("a%2Bb%3D") && !l.includes("a+b=")), `키 가림: ${logs.join(" | ")}`);
+});
+
 // ---------- 실제 API (키가 있을 때만) ----------
 async function realEnv(): Promise<Env> {
   const env: Env = { SUBWAY_KEY: Deno.env.get("SUBWAY_KEY") ?? "", BUS_KEY: Deno.env.get("BUS_KEY") ?? "", log: quiet };
@@ -230,5 +303,19 @@ Deno.test({ name: "실제 API: 경로별 live 문구 (결과는 시각마다 다
     console.log(`  ${name}\n     >> ${liveText(items)}${items[1] ? `\n     체인: ${items[1].chain}` : ""}`);
     ok(items.length >= 1 && items[0].line.startsWith(line), `${name}: ${JSON.stringify(items[0])}`);
     ok(items[0].note !== "실시간 조회 실패", `${name}: 조회 실패`);
+  }
+} });
+
+Deno.test({ name: "실제 API: 탈 차 정하고 하차 지점 도착 예상 (시각마다 다름 — 실패 없이 도는지만)", ignore: !REAL.SUBWAY_KEY || !REAL.BUS_KEY, fn: async () => {
+  const cases: [string, Seg][] = [
+    ["4호선 노원→창동 (한 정거장)", S("노원역", "창동역", "4호선")],
+    ["4호선 노원→사당 (멀어서 none일 수 있음)", S("노원역", "사당역", "4호선")],
+    ["버스 1132 11354→11212", B("11354", "11212", "1132 (중계주공10단지.중계건영3차아파트→롯데백화점노원점.노원역4번출구)")],
+  ];
+  for (const [name, seg] of cases) {
+    const ride = await boardingVehicle(seg, REAL);
+    const eta = await rideEta(seg, ride, REAL);
+    console.log(`  ${name}: 탈 차 ${JSON.stringify(ride)} → 하차 지점 ${JSON.stringify(eta)}`);
+    ok(eta.source === "none" ? eta.etaSec === null : (eta.etaSec ?? -1) >= 0, `${name}: ${JSON.stringify(eta)}`);
   }
 } });
