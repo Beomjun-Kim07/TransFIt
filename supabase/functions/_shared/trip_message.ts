@@ -2,9 +2,11 @@
 // 단계: started만 → 승차 지점으로 이동 중 / platform_at → 승강장 대기 / boarded_at → 탑승 중
 //       transfer_off_at → 환승 이동 / transfer_on_at → 두 번째 탑승 중
 // 도착 예상 = 지금 + 남은 구간 예상 합 + 실시간 대기(_shared/realtime.ts liveChain). 목표 대비 빠름/늦음.
+// 탑승 중이면 하차 지점까지 남은 정거장 한 줄 (_shared/alight.ts alightLine: '🚏 노원 하차까지 3정거장').
 
 import { liveChain, liveLineText, isRide, segLabel, lineLabel, busLabel, stopName, normStation, REALTIME_HORIZON,
   type Seg, type ChainItem, type Env } from "./realtime.ts";
+import { alightState, alightLine, type AlightState } from "./alight.ts";
 
 export type Trip = Record<string, any>;           // trips 행 + routes(name, arrive_by, …) + users(telegram_chat_id)
 export type Markup = { inline_keyboard: { text: string; callback_data: string }[][] };
@@ -124,9 +126,14 @@ export function position(t: Trip, segments: Seg[], now: Date) {
 }
 
 // ---------- 메시지 ----------
-/** 이동 중 메시지. live = 실시간 체인 결과를 주입(tick은 캐시를 끼움), 없으면 직접 조회. */
-export async function liveMessage(t: Trip, segments: Seg[], env: Env, live?: (fromIndex: number, walkSec: number) => Promise<ChainItem[]>) {
+/** 이동 중 메시지. live = 실시간 체인 결과를 주입(tick은 캐시를 끼움), 없으면 직접 조회.
+ *  alight = 하차 상태(tick이 알림과 같이 쓰려고 미리 구한 것). undefined면 탑승 중일 때 직접 구하고, null이면 그 줄 없음. */
+export async function liveMessage(t: Trip, segments: Seg[], env: Env, live?: (fromIndex: number, walkSec: number) => Promise<ChainItem[]>,
+                                  alight?: AlightState | null) {
   const now = env.now ?? new Date();
+  if (alight === undefined) {
+    try { alight = await alightState(t, segments, { ...env, now }); } catch (e) { console.error("alight", String(e)); alight = null; }
+  }
   const route = t.routes, p = position(t, segments, now);
   let liveLine = "", remaining = p.remaining, waitNote = "";
   if (p.next >= 0) {
@@ -155,6 +162,7 @@ export async function liveMessage(t: Trip, segments: Seg[], env: Env, live?: (fr
   const icon = curRide ? (curRide.kind === "bus" ? "🚌" : "🚇") : STAGE_ICON[p.stage];
   const text = [`🧭 이동 중 · ${route.name}`,
     `${icon} ${STAGE[p.stage]} · 출발 ${hhmm(new Date(t.started_at))} (${mins(since(t.started_at, now))}분 경과)`,
+    alightLine(alight),
     liveLine,
     `도착 예상 ${hhmm(eta)}${vs} (남은 약 ${mins(remaining)}분${waitNote})`].filter(Boolean).join("\n");
   return { text, markup: buttons(t, segments) };

@@ -12,10 +12,14 @@
 //       trip:transfer_off_at:<trip_id> 환승역 하차
 //       trip:transfer_on_at:<trip_id>  환승 열차 탑승
 //       trip:ended_at:<trip_id>      목적지 도착
+//     탑승(boarded_at)·환승 탑승(transfer_on_at)을 처음 기록하면 그 순간 탄 차를 정해(_shared/alight.ts rideOnBoard →
+//     realtime.ts boardingVehicle boarded) trips.ride_train(지하철 btrainNo)·ride_veh(버스 vehId)에 넣는다 — tick 하차 알림이 이 차를 따라간다.
+//     못 정하면 둘 다 null (앞 구간 차를 지움 → 하차 알림은 추정).
 //
 // 환경변수: BOT_TOKEN, TELEGRAM_SECRET(웹훅 검증), SUPABASE_URL·SUPABASE_SERVICE_ROLE_KEY(자동 주입)
 
 import { liveMessage, finalMessage, estimateDuration, TRIP_FIELDS, LOOKBACK_DAYS, type Trip } from "../_shared/trip_message.ts";
+import { rideOnBoard } from "../_shared/alight.ts";
 
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
 const SUBWAY_KEY = Deno.env.get("SUBWAY_KEY") ?? "";
@@ -156,7 +160,7 @@ async function onCallback(q: any): Promise<string | void> {
     const [user] = await db("GET", `users?telegram_chat_id=eq.${chat_id}&select=id`);
     if (!user) throw new Error("연결된 계정이 없어요");
 
-    let trip: Trip;
+    let trip: Trip, fresh = false;
     if (field === "start") {
       const [open] = await db("GET", `trips?user_id=eq.${user.id}&route_id=eq.${id}&ended_at=is.null&order=started_at.desc&limit=1&select=${SELECT}`);
       if (open && now.getTime() - Date.parse(open.started_at) < 3 * 3600_000) { trip = open; await toast("이미 출발 기록이 있어요"); }
@@ -169,10 +173,16 @@ async function onCallback(q: any): Promise<string | void> {
       const [cur] = await db("GET", `trips?id=eq.${id}&user_id=eq.${user.id}&select=${SELECT}`);
       if (!cur) throw new Error("기록을 찾지 못했어요");
       if (cur[field]) { trip = cur; await toast("이미 기록된 단계예요"); }
-      else { [trip] = await db("PATCH", `trips?id=eq.${id}&select=${SELECT}`, { [field]: nowIso }); await toast(`${field === "ended_at" ? "도착" : "단계"} 기록했어요`); }
+      else { [trip] = await db("PATCH", `trips?id=eq.${id}&select=${SELECT}`, { [field]: nowIso }); fresh = true; await toast(`${field === "ended_at" ? "도착" : "단계"} 기록했어요`); }
     }
 
     const segments = await db("GET", `segments?route_id=eq.${trip.route_id}&order=seq`);
+    if (fresh) {   // 탑승·환승 탑승: 탄 차 기록 (ride_veh·ride_train 컬럼이 아직 없으면 실패 — 단계 기록은 그대로)
+      try {
+        const ride = await rideOnBoard(field, segments, { SUBWAY_KEY, BUS_KEY, now });
+        if (ride) { await db("PATCH", `trips?id=eq.${trip.id}`, ride); Object.assign(trip, ride); }
+      } catch (e) { console.error("ride", String(e)); }
+    }
     let text: string, markup: unknown;
     if (trip.ended_at) {
       let expected = trip.expected_sec;

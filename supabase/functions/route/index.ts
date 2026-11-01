@@ -3,6 +3,8 @@
 // 입력: { from: "노원역", to: "연세대학교 정문" }                       ← 이름으로 지오코딩
 //       { fromX, fromY, toX, toY, from?, to? }                        ← 좌표(경도 x, 위도 y)를 주면 지오코딩 생략. from/to는 표시 이름
 // 출력: { from:{name,x,y}, to:{name,x,y}, originIsStop, destIsStop, routes:[{type,totalTime,totalDistance,transfers,fare,originIsStop,destIsStop,steps:[...]}] }
+//       steps[].stops: SUBWAY·BUS 구간의 정거장 이름 목록(승차·하차 포함, 카카오 stops 순서). 웹이 segments.stop_names에 저장 →
+//       tick 하차 알림이 실시간으로 못 잡을 때 정거장 수로 비례 추정한다. WALKING은 null.
 //       첫 승차 지점이 출발 좌표에서 30m 이상이면 WALKING step(added:true)을 앞에, 마지막 하차 지점이 도착 좌표에서 30m 이상이면 뒤에 붙이고
 //       totalTime/totalDistance에 더한다. 30m 이내면 originIsStop / destIsStop: true
 // 단위: time/totalTime은 초, distance/totalDistance는 m (2026-10-31 실제 응답으로 확인).
@@ -58,7 +60,7 @@ async function prependOriginWalk(route: any, origin: { name: string; x: string; 
   if (straight < ORIGIN_STOP_M) return { route, originIsStop: true };
   const distance = Math.round(await walkDistance(ox, oy, sx, sy));
   const time = Math.round(distance / WALK_MPS);
-  const walk = { type: "WALKING", time, distance, from: origin.name, to: first.from, arsId: null, arsIdTo: null, line: null, vehicleType: null,
+  const walk = { type: "WALKING", time, distance, from: origin.name, to: first.from, arsId: null, arsIdTo: null, stops: null, line: null, vehicleType: null,
                  guidance: `${origin.name}에서 ${first.from ?? "승차 지점"}까지 도보 (카카오 응답에 없어 추가)`, added: true };
   return { route: { ...route, totalTime: (route.totalTime ?? 0) + time, totalDistance: (route.totalDistance ?? 0) + distance, steps: [walk, ...route.steps] }, originIsStop: false };
 }
@@ -72,7 +74,7 @@ async function appendDestWalk(route: any, dest: { name: string; x: string; y: st
   if (haversine(ex, ey, dx, dy) < ORIGIN_STOP_M) return { route, destIsStop: true };
   const distance = Math.round(await walkDistance(ex, ey, dx, dy));
   const time = Math.round(distance / WALK_MPS);
-  const walk = { type: "WALKING", time, distance, from: last.to, to: dest.name, arsId: null, arsIdTo: null, line: null, vehicleType: null,
+  const walk = { type: "WALKING", time, distance, from: last.to, to: dest.name, arsId: null, arsIdTo: null, stops: null, line: null, vehicleType: null,
                  guidance: `${last.to ?? "하차 지점"}에서 ${dest.name}까지 도보 (카카오 응답에 없어 추가)`, added: true };
   return { route: { ...route, totalTime: (route.totalTime ?? 0) + time, totalDistance: (route.totalDistance ?? 0) + distance, steps: [...route.steps, walk] }, destIsStop: false };
 }
@@ -118,6 +120,7 @@ async function simplify(route: any) {
       time: sp.time, distance: sp.distance, // 초, m
       from, to,
       arsId, arsIdTo,                      // BUS만: 승차/하차 정류장 번호(5자리), 못 찾으면 null
+      stops: sp.type === "SUBWAY" || sp.type === "BUS" ? stops.map((x: any) => x?.name).filter(Boolean) : null,   // 정거장 이름 (승차·하차 포함)
       line: veh?.name ?? null, vehicleType: veh?.type ?? null,
       guidance: sp.guidance ?? null,
     };

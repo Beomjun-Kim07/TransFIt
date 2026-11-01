@@ -8,8 +8,16 @@
 //   그 외       → 오늘 열린 trip에 시각 기록. 이미 적힌 단계면 무시(그대로 ok)
 // 응답 { ok:true, trip_id, step, next_step, duplicate? }  /  { ok:false, error }
 // 기록되면 텔레그램으로 "🚉 승강장 도착 기록됨" 한 줄을 보낸다 (연결된 경우).
+// boarded_at·transfer_on_at을 기록하면 그 순간 탄 차를 정해 trips.ride_train·ride_veh에 넣는다 (tick 하차 알림용, _shared/alight.ts).
+//   웹앱은 단계를 직접 기록한 뒤 같은 step으로 이 함수를 부른다 → duplicate지만 기록된 지 60초 안이면 탄 차만 정한다.
+//   응답에 ride { ride_veh, ride_train } (못 정하면 null 둘).
+
+import { rideOnBoard } from "../_shared/alight.ts";
 
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
+const SUBWAY_KEY = Deno.env.get("SUBWAY_KEY") ?? "";
+const BUS_KEY = Deno.env.get("BUS_KEY") ?? "";
+const RIDE_RECENT_MS = 60_000;   // 이미 기록된 탑승 단계라도 이 안이면 탄 차를 정한다 (웹앱이 직접 기록한 뒤 부르는 경우)
 const SB_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
@@ -94,6 +102,16 @@ Deno.serve(async (req) => {
       else [trip] = await db("PATCH", `trips?id=eq.${open.id}`, { [step]: nowIso });
     }
 
+    let ride: Record<string, string | null> | null = null;
+    const at = trip[step] ? Date.parse(String(trip[step])) : NaN;
+    if ((step === "boarded_at" || step === "transfer_on_at") && (!duplicate || now.getTime() - at < RIDE_RECENT_MS)) {
+      try {
+        const segments = await db("GET", `segments?route_id=eq.${route.id}&order=seq`);
+        ride = await rideOnBoard(step, segments, { SUBWAY_KEY, BUS_KEY, now });
+        if (ride) await db("PATCH", `trips?id=eq.${trip.id}`, ride);
+      } catch (e) { console.error("ride", String(e)); ride = null; }   // ride_veh·ride_train 컬럼이 없으면 여기서 실패 — 기록은 그대로
+    }
+
     if (!duplicate) {
       let text = `${MSG[step as Step]} · ${route.name}`;
       if (step === "ended_at") {
@@ -102,7 +120,7 @@ Deno.serve(async (req) => {
       }
       await notify(user.telegram_chat_id, text);
     }
-    return json({ ok: true, trip_id: trip.id, step, next_step: nextStep(trip), duplicate });
+    return json({ ok: true, trip_id: trip.id, step, next_step: nextStep(trip), duplicate, ...(ride ? { ride } : {}) });
   } catch (e) {
     console.error(e);
     return json({ ok: false, error: String(e?.message ?? e) }, 500);

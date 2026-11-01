@@ -327,6 +327,9 @@
     <section id="tab-settings" class="hidden">
       <div class="ghead">텔레그램 알림</div>
       <div id="tgBody"><div class="group"><div class="cell sub">불러오는 중…</div></div></div>
+      <div class="ghead">하차 알림</div>
+      <div id="alightBody"><div class="group"><div class="cell sub">불러오는 중…</div></div></div>
+      <div class="gfoot">탑승 버튼을 누른 뒤 내릴 곳(환승역·정류장, 마지막 하차 지점)이 가까워지면 텔레그램 새 메시지로 알려요. 탄 열차·버스를 실시간으로 못 찾으면 예상 시간으로 짐작하고 (추정)을 붙여요.</div>
       <div class="ghead">경로별 알림</div>
       <div id="routeSettings"></div>
       <div class="gfoot">신뢰 수준 90% = 내 기록 10번 중 9번은 늦지 않는 시각. 높일수록 일찍 출발해요.</div>
@@ -413,6 +416,7 @@ const TABS = ["home", "find", "records", "settings"], TITLES = { home:"TransFit"
 const HASH_TAB = location.hash.slice(1).split("/")[0];   // #records/12 같은 상세 주소로 새로 열면 첫 화면부터
 let user = null, shownFor, tab = TABS.includes(HASH_TAB) ? HASH_TAB : "home";
 let routes = [], segsBy = {}, tripsAll = [], tgLinked = null, apiToken, reissuing = false;   // apiToken: undefined = 아직 못 읽음, null = 없음
+let alightPref;   // users.alight_alerts ('2,1,0'): undefined = 아직 못 읽음, false = 컬럼 없음(SQL 실행 전)
 let busyId = null, skipTo = {}, newDays = [1,1,1,1,1,0,0], found = null, lastSync = 0;
 const openDetails = new Set();
 const $ = id => document.getElementById(id);
@@ -528,7 +532,7 @@ async function render() {
   document.body.classList.toggle("authed", !!user);   // 설치 안내를 탭바 위로 올린다
   $("auth").classList.toggle("hidden", !!user);
   $("app").classList.toggle("hidden", !user);
-  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; closeMenu(); closeRec(false); if (segEdit) hideSegEdit(); return; }
+  if (!user) { routes = []; segsBy = {}; tripsAll = []; tgLinked = null; apiToken = undefined; alightPref = undefined; closeMenu(); closeRec(false); if (segEdit) hideSegEdit(); return; }
   showTab(); lastSync = Date.now();
   await Promise.all([loadTelegram(), loadAll()]);
 }
@@ -624,11 +628,13 @@ function nextIdx(r, t) {
   if (skipTo[t.id]) n = Math.max(n, skipTo[t.id]);
   return Math.min(n, steps.length - 1);
 }
+// 정거장 목록(승차·하차 포함) → '5개 역 · ' / '8개 정류장 · '. segments.stop_names·route steps[].stops (하차 알림 추정에도 쓴다)
+const hopsTxt = (kind, stops) => Array.isArray(stops) && stops.length > 1 ? `${stops.length - 1}개 ${kind === "bus" ? "정류장" : "역"} · ` : "";
 function segRail(r) {
   const items = segsOf(r).map((s, i) => {
     const p = partOf(s.kind, s.expected_sec, s.line), pl = segPlaces(s);
     if (s.kind === "subway" || s.kind === "bus")
-      return { color: p.color, title: `${chip(p)} ${pl.from || ""} 승차`, sub: `${pl.to || ""} 하차 · ${p.min}분${s.updn ? ` · ${esc(s.updn)}` : ""}` };
+      return { color: p.color, title: `${chip(p)} ${pl.from || ""} 승차`, sub: `${pl.to || ""} 하차 · ${hopsTxt(s.kind, s.stop_names)}${p.min}분${s.updn ? ` · ${esc(s.updn)}` : ""}` };
     return { walk: true, title: s.kind === "transfer" ? "환승 도보" : i === 0 && s.station_from ? `${pl.from}에서 도보` : "도보",
              sub: `${s.distance_m ? `${s.distance_m}m · ` : ""}${p.min}분` };
   });
@@ -698,8 +704,15 @@ async function markField(id, f) {
   }
   busyId = null;
   if (error) { alert("기록 실패: " + error.message); renderHome(); return; }
+  if ((f === "boarded_at" || f === "transfer_on_at") && apiToken) rideLookup(r.id, f);
   navigator.vibrate?.(20);
   await reloadTrips();
+}
+// 탑승 기록 직후 trip 함수에 같은 단계를 보낸다 → 이미 기록됨(duplicate)이지만 60초 안이라 그 순간 탄 열차·버스를 정해
+// trips.ride_train·ride_veh에 넣는다 (키가 있는 서버에서만 실시간 조회 가능). 하차 알림이 그 차를 따라간다. 실패해도 기록엔 영향 없음
+function rideLookup(routeId, step) {
+  fetch(`${C.SUPABASE_URL}/functions/v1/trip`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: apiToken, route_id: routeId, step }) }).catch(() => {});
 }
 function skipStep(id) {
   const r = routeById(id), open = r && openTripOf(r); if (!open) return;
@@ -879,7 +892,7 @@ function stepRail(steps) {
     const kind = stepKind(steps, i), p = partOf(kind, st.time, st.line, st.vehicleType);
     if (kind === "subway" || kind === "bus")
       return { color: p.color, title: `${chip(p)} ${stopHtml(withArs(st.from, st.arsId)) || ""} 승차`,
-               sub: `${stopHtml(withArs(st.to, st.arsIdTo)) || ""} 하차 · ${p.min}분` };
+               sub: `${stopHtml(withArs(st.to, st.arsIdTo)) || ""} 하차 · ${hopsTxt(kind, st.stops)}${p.min}분` };
     return { walk: true, title: kind === "transfer" ? "환승 도보" : i === 0 ? `${esc(found.from.name)}에서 도보` : "도보",
              sub: `${st.distance ? `${st.distance}m · ` : ""}${p.min}분${st.added ? ` <span class="est">(카카오 미제공 · 추정)</span>` : ""}` };   // added = route 함수가 붙인 도보
   }).concat([{ end: true, title: esc(found.to.name), sub: "도착" }]));
@@ -999,21 +1012,23 @@ async function saveRoute(i) {
     if (!m) return;
     asks.forEach((a, k) => { add[a.at] = m[k] * 60; });
   }
-  const walkRow = (sec, a, b) => ({ kind: "walk", station_from: a, station_to: b, line: null, updn: null, distance_m: null, expected_sec: sec });
+  const walkRow = (sec, a, b) => ({ kind: "walk", station_from: a, station_to: b, line: null, updn: null, distance_m: null, expected_sec: sec, stop_names: null });
   const { data: route, error } = await sb.from("routes").insert({ user_id: user.id,
     name: `${from} → ${to}`, arrive_by: $("rArrive").value || "09:00",
     active_days: daysStr(), baseline_sec: Math.round(r.totalTime) + add.start + add.end }).select().single();
   if (error) return alert(error.message);
   const rows = [...(add.start ? [walkRow(add.start, "집", from)] : []), ...segmentRows(r, route.id), ...(add.end ? [walkRow(add.end, to, "목적지")] : [])]
     .map((s, k) => ({ ...s, route_id: route.id, seq: k + 1 }));
-  const { error: e2 } = await sb.from("segments").insert(rows);
+  let { error: e2 } = await sb.from("segments").insert(rows);
+  if (e2 && /stop_names/.test(e2.message)) ({ error: e2 } = await sb.from("segments").insert(rows.map(({ stop_names, ...x }) => x)));   // 컬럼 추가 SQL 실행 전
   if (e2) return alert(e2.message);
   $("routeOptions").innerHTML = ""; $("findMsg").textContent = ""; $("rFrom").value = $("rTo").value = "";
   picked.from = picked.to = null; $("resControls").classList.add("hidden");
   await loadAll(); setTab("home"); toast("경로를 저장했어요");
   $("rc-" + route.id)?.scrollIntoView({ behavior:"smooth", block:"start" });
 }
-// 카카오 경로 하나 → segments 행들
+// 카카오 경로 하나 → segments 행들. 지하철·버스는 정거장 이름 목록(route steps[].stops)을 stop_names에 —
+// tick 하차 알림이 탄 차를 실시간으로 못 잡을 때 '탄 뒤 흐른 시간 ÷ 예상 × 정거장 수'로 추정한다
 function segmentRows(r, routeId) {
   return r.steps.map((st, idx) => {
     const kind = stepKind(r.steps, idx);
@@ -1022,7 +1037,8 @@ function segmentRows(r, routeId) {
     let line = st.line ?? null;
     if (kind === "bus") [sFrom, sTo, line] = busFields(st);
     return { route_id: routeId, seq: idx + 1, kind, station_from: sFrom, station_to: sTo, line, updn: null,
-      distance_m: st.distance || null, expected_sec: Math.round((kind === "walk" || kind === "transfer") ? walkSec : st.time) };
+      distance_m: st.distance || null, expected_sec: Math.round((kind === "walk" || kind === "transfer") ? walkSec : st.time),
+      stop_names: (kind === "subway" || kind === "bus") && Array.isArray(st.stops) && st.stops.length > 1 ? st.stops : null };
   });
 }
 // ---------- 구간 수정 (홈 ··· 메뉴) ----------
@@ -1041,6 +1057,7 @@ function segDraft(s) {
     if (d.fromNo && d.from === d.fromNo) d.from = ""; if (d.toNo && d.to === d.toNo) d.to = "";
   }
   d.min0 = d.min; d.dist0 = d.dist;
+  d.stops = s.stop_names; d.place0 = [s.kind, s.station_from, s.station_to].join("|");   // 정거장 목록은 역·정류장이 그대로일 때만 유지
   return d;
 }
 function segRow(d, i) {   // 초안 → segments 행
@@ -1058,6 +1075,7 @@ function segRow(d, i) {   // 초안 → segments 행
   if (minChanged) row.expected_sec = Number(d.min) > 0 ? Math.round(Number(d.min) * 60) : byDist;
   else if (distChanged && byDist) row.expected_sec = byDist;
   else row.expected_sec = d.sec ?? byDist;
+  if (Array.isArray(d.stops) && d.place0 !== [row.kind, row.station_from, row.station_to].join("|")) row.stop_names = null;
   return row;
 }
 function segHeadChip(d, i) { const p = partOf(d.kind, 0, segRow(d, i).line); return p.color ? chip(p) : `<b>${p.name}</b>`; }
@@ -1343,7 +1361,27 @@ function renderSettings() {
       <label class="cell"><span class="grow">첫 알림</span><select class="inline" onchange="saveRouteField(${r.id},'lead_min',this.value)">${opts(LEADS, r.lead_min ?? 30, v => `출발 ${v}분 전`)}</select></label>
       <label class="cell"><span class="grow">신뢰 수준</span><select class="inline" onchange="saveRouteField(${r.id},'confidence',this.value)">${opts(CONFS, r.confidence ?? 90, v => `${v}%`)}</select></label>
     </div>`).join("") : `<div class="group"><div class="cell sub">저장된 경로가 없어요.</div></div>`;
-  renderAuto();
+  renderAuto(); renderAlight();
+}
+// 하차 알림: users.alight_alerts = 켠 단계 '2,1,0' (2정거장 전 · 1정거장 전 · 도착). tick이 이 값을 보고 보낸다
+const ALIGHT = [[2, "2정거장 전", "2정거장 뒤 ○○ 하차"], [1, "1정거장 전", "다음 역 ○○, 내릴 준비"], [0, "도착", "○○ 도착 · 내리세요"]];
+const alightSet = v => new Set(String(v ?? "").split(/[^0-9]+/).filter(x => /^[012]$/.test(x)).map(Number));
+function renderAlight() {
+  const el = $("alightBody"); if (!el) return;
+  if (alightPref === undefined) { el.innerHTML = `<div class="group"><div class="cell sub">불러오는 중…</div></div>`; return; }
+  if (alightPref === false) { el.innerHTML = `<div class="group"><div class="cell sub">준비 중이에요 (DB 업데이트 뒤 켤 수 있어요). 지금은 세 단계 모두 보내요.</div></div>`; return; }
+  const on = alightSet(alightPref);
+  el.innerHTML = `<div class="group">${ALIGHT.map(([k, name, ex]) => `<div class="cell"><div class="grow">${name}<div class="cap">${ex}</div></div>
+      <button class="sw" role="switch" aria-checked="${on.has(k)}" aria-label="하차 알림 ${name}" onclick="toggleAlight(${k})"><span class="track"></span></button></div>`).join("")}</div>`;
+}
+async function toggleAlight(k) {
+  if (typeof alightPref !== "string") return;
+  const on = alightSet(alightPref), old = alightPref;
+  on.has(k) ? on.delete(k) : on.add(k);
+  alightPref = [2, 1, 0].filter(x => on.has(x)).join(","); renderAlight();   // 먼저 바꿔 보여주고, 실패하면 되돌린다
+  const { error } = await sb.from("users").update({ alight_alerts: alightPref }).eq("id", user.id);
+  if (error) { alightPref = old; renderAlight(); return alert("저장하지 못했어요: " + error.message); }
+  toast(on.size ? "하차 알림을 저장했어요" : "하차 알림을 모두 껐어요");
 }
 // 자동화 토큰: 아이폰 단축어·안드로이드 앱이 trip 함수로 trips에 기록할 때 쓰는 users.api_token (docs/shortcuts.md)
 const SHORTCUTS_DOC = "https://github.com/Beomjun-Kim07/TransFit/blob/main/docs/shortcuts.md";
@@ -1403,12 +1441,18 @@ async function saveRouteField(id, f, v) {
 }
 // 텔레그램
 const newCode = () => Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, "0")).join("");
+const PROFILE_COLS = "telegram_chat_id, link_code, api_token";
+let profileCols = PROFILE_COLS + ", alight_alerts";
 async function profile() {
-  let { data, error } = await sb.from("users").select("telegram_chat_id, link_code, api_token").eq("id", user.id).maybeSingle();
+  let { data, error } = await sb.from("users").select(profileCols).eq("id", user.id).maybeSingle();
+  if (error && /alight_alerts/.test(error.message)) {   // users.alight_alerts 컬럼 추가 SQL 실행 전
+    profileCols = PROFILE_COLS;
+    ({ data, error } = await sb.from("users").select(profileCols).eq("id", user.id).maybeSingle());
+  }
   if (error) throw error;
   if (!data) {   // 가입 트리거보다 먼저 만든 계정: 행을 만든다 (routes 저장에도 필요)
     ({ data, error } = await sb.from("users").upsert({ id: user.id, email: user.email, link_code: newCode() })
-      .select("telegram_chat_id, link_code, api_token").single());
+      .select(profileCols).single());
     if (error) throw error;
   } else if (!data.telegram_chat_id && !data.link_code) {
     const code = newCode();
@@ -1425,10 +1469,12 @@ async function loadTelegram(manual) {
     $("tgBody").innerHTML = `<div class="group"><div class="cell"><span class="grow sub">상태를 못 불러왔어요: ${esc(e.message)}</span>
       <button id="tgRefresh" class="tbtn" onclick="loadTelegram(true)">다시 시도</button></div></div>`;
     if (apiToken === undefined) $("autoBody").innerHTML = `<div class="group"><div class="cell sub">토큰을 못 불러왔어요. 위 다시 시도를 눌러 주세요.</div></div>`;
+    if (alightPref === undefined) $("alightBody").innerHTML = `<div class="group"><div class="cell sub">설정을 못 불러왔어요. 위 다시 시도를 눌러 주세요.</div></div>`;
     return;
   }
   tgLinked = !!p.telegram_chat_id; renderHome();
   if (!reissuing) { apiToken = p.api_token || null; renderAuto(); }
+  alightPref = "alight_alerts" in p ? (p.alight_alerts ?? "2,1,0") : false; renderAlight();
   const checked = `<span class="cap">${hhmm(new Date())} 확인</span>`;
   if (tgLinked) {
     $("tgBody").innerHTML = `<div class="group"><div class="cell"><div class="grow">연결됨 <span class="accent">✓</span> ${checked}</div>
