@@ -144,7 +144,7 @@ async function onMessage(m: any): Promise<string | void> {
 // start → trips 행 만들고 이동 중 메시지(tick과 같은 포맷)를 보내 live_msg_id 저장.
 // 그 외 → 시각 기록 후 그 메시지를 즉시 고쳐 쓴다 (새 메시지 없음). 콜백 응답은 토스트.
 const SELECT = "*,routes(id,name,arrive_by,confidence,baseline_sec,fallback_min)";
-async function onCallback(q: any) {
+async function onCallback(q: any): Promise<string | void> {
   const chat_id: number = q.message?.chat?.id;
   const data: string = q.data ?? "";
   const [kind, field, idStr] = data.split(":");
@@ -198,6 +198,7 @@ async function onCallback(q: any) {
     await db("PATCH", `trips?id=eq.${trip.id}`, { live_msg_id: trip.ended_at ? null : msgId });
   } catch (e) {
     await toast(String(e?.message ?? e), true);
+    return `err: ${String(e?.message ?? e)}`;                       // 응답 본문 (텔레그램은 무시, curl 테스트용)
   }
 }
 
@@ -211,7 +212,7 @@ Deno.serve(async (req) => {
     if (upd.message) {
       const t = await onMessage(upd.message);
       if (t) return new Response(t);                               // /next 답장 본문 (텔레그램은 무시, curl 테스트용)
-    } else if (upd.callback_query) await onCallback(upd.callback_query);
+    } else if (upd.callback_query) { const t = await onCallback(upd.callback_query); if (t) return new Response(t); }
   } catch (e) {
     console.error(e);
   }

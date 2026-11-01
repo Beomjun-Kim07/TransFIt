@@ -51,6 +51,7 @@ export function usableDurations(trips: any[]) {
   return out;
 }
 export function estimateDuration(route: any, segments: Seg[], trips: any[]) {
+  route = route ?? {};
   const durs = usableDurations(trips);
   if (durs.length >= MIN_SAMPLES) return Math.trunc(quantile(durs, (route.confidence ?? 90) / 100));
   if (route.baseline_sec) return Math.trunc(route.baseline_sec);
@@ -160,7 +161,9 @@ export async function liveMessage(t: Trip, segments: Seg[], env: Env, live?: (fr
 }
 
 /** 도착 메시지: "🏁 도착 · 총 N분 (예상 M분)". expectedSec = trips.expected_sec 또는 추정값 */
-export function finalMessage(t: Trip, expectedSec: number) {
+export function finalMessage(t: Trip, expectedSec: number | null | undefined) {
   const sec = Math.max(0, Math.round((Date.parse(t.ended_at) - Date.parse(t.started_at)) / 1000));
-  return { text: `🏁 도착 · 총 ${Math.floor(sec / 60)}분 ${sec % 60}초 (예상 ${Math.ceil(expectedSec / 60)}분)\n${t.routes.name}`, markup: { inline_keyboard: [] } as Markup };
+  const exp = Number(expectedSec);
+  const expTxt = Number.isFinite(exp) && exp > 0 ? `예상 ${Math.ceil(exp / 60)}분` : "예상 없음";
+  return { text: `🏁 도착 · 총 ${Math.floor(sec / 60)}분 ${sec % 60}초 (${expTxt})\n${t.routes?.name ?? ""}`, markup: { inline_keyboard: [] } as Markup };
 }

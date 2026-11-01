@@ -2,8 +2,9 @@
 // 브라우저가 카카오 키를 들고 있지 않도록, 길찾기를 서버에서 대신 호출한다.
 // 입력: { from: "노원역", to: "연세대학교 정문" }                       ← 이름으로 지오코딩
 //       { fromX, fromY, toX, toY, from?, to? }                        ← 좌표(경도 x, 위도 y)를 주면 지오코딩 생략. from/to는 표시 이름
-// 출력: { from:{name,x,y}, to:{name,x,y}, originIsStop, routes:[{type,totalTime,totalDistance,transfers,fare,originIsStop,steps:[...]}] }
-//       첫 승차 지점이 출발 좌표에서 30m 이상이면 WALKING step(added:true)을 앞에 붙이고 totalTime/totalDistance에 더한다. 30m 이내면 originIsStop:true
+// 출력: { from:{name,x,y}, to:{name,x,y}, originIsStop, destIsStop, routes:[{type,totalTime,totalDistance,transfers,fare,originIsStop,destIsStop,steps:[...]}] }
+//       첫 승차 지점이 출발 좌표에서 30m 이상이면 WALKING step(added:true)을 앞에, 마지막 하차 지점이 도착 좌표에서 30m 이상이면 뒤에 붙이고
+//       totalTime/totalDistance에 더한다. 30m 이내면 originIsStop / destIsStop: true
 // 단위: time/totalTime은 초, distance/totalDistance는 m (2026-10-31 실제 응답으로 확인).
 // 카카오 stops에는 이름만 오고 정류장 번호가 없다. BUS 구간은 path.points의 첫/끝 좌표로
 // 서울 버스 API getStationByPos를 불러 arsId(5자리)를 채운다. (BUS_KEY 없거나 실패하면 null)
@@ -60,6 +61,20 @@ async function prependOriginWalk(route: any, origin: { name: string; x: string; 
   const walk = { type: "WALKING", time, distance, from: origin.name, to: first.from, arsId: null, arsIdTo: null, line: null, vehicleType: null,
                  guidance: `${origin.name}에서 ${first.from ?? "승차 지점"}까지 도보 (카카오 응답에 없어 추가)`, added: true };
   return { route: { ...route, totalTime: (route.totalTime ?? 0) + time, totalDistance: (route.totalDistance ?? 0) + distance, steps: [walk, ...route.steps] }, originIsStop: false };
+}
+
+/** 마지막 step 뒤에 도착지 도보를 붙인다 (마지막 하차 지점 ↔ 도착 좌표). → { route, destIsStop } */
+async function appendDestWalk(route: any, dest: { name: string; x: string; y: string }, rawLast: any) {
+  const last = route.steps[route.steps.length - 1];
+  const pts: number[][] = rawLast?.path?.points ?? [];
+  if (!last || last.type === "WALKING" || !pts.length) return { route, destIsStop: false };
+  const dx = Number(dest.x), dy = Number(dest.y), [ex, ey] = pts[pts.length - 1];
+  if (haversine(ex, ey, dx, dy) < ORIGIN_STOP_M) return { route, destIsStop: true };
+  const distance = Math.round(await walkDistance(ex, ey, dx, dy));
+  const time = Math.round(distance / WALK_MPS);
+  const walk = { type: "WALKING", time, distance, from: last.to, to: dest.name, arsId: null, arsIdTo: null, line: null, vehicleType: null,
+                 guidance: `${last.to ?? "하차 지점"}에서 ${dest.name}까지 도보 (카카오 응답에 없어 추가)`, added: true };
+  return { route: { ...route, totalTime: (route.totalTime ?? 0) + time, totalDistance: (route.totalDistance ?? 0) + distance, steps: [...route.steps, walk] }, destIsStop: false };
 }
 
 // 좌표(경도 x, 위도 y) 근처 정류장 중 이름이 같은 것, 없으면 가장 가까운 것의 arsId
@@ -127,10 +142,15 @@ Deno.serve(async (req) => {
     const j = await r.json();
     const raw = j.routes ?? [];
     const simplified = await Promise.all(raw.map(simplify));
-    const fixed = await Promise.all(simplified.map((r: any, i: number) => prependOriginWalk(r, a, raw[i]?.steps?.[0])));
-    const routes = fixed.map((f) => ({ ...f.route, originIsStop: f.originIsStop }));
+    const fixed = await Promise.all(simplified.map(async (r: any, i: number) => {
+      const o = await prependOriginWalk(r, a, raw[i]?.steps?.[0]);
+      const d = await appendDestWalk(o.route, b, raw[i]?.steps?.[raw[i].steps.length - 1]);
+      return { route: { ...d.route, originIsStop: o.originIsStop, destIsStop: d.destIsStop }, originIsStop: o.originIsStop, destIsStop: d.destIsStop };
+    }));
+    const routes = fixed.map((f) => f.route);
     const originIsStop = fixed.some((f) => f.originIsStop);   // 출발지가 정류장/역 자체(30m 이내) → 웹이 집→정류장 도보 분을 물어 넣는다
-    return new Response(JSON.stringify({ from: a, to: b, originIsStop, routes }), { headers: { ...cors, "Content-Type": "application/json" } });
+    const destIsStop = fixed.some((f) => f.destIsStop);       // 도착지가 정류장/역 자체
+    return new Response(JSON.stringify({ from: a, to: b, originIsStop, destIsStop, routes }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e?.message ?? e) }), { status: 400, headers: { ...cors, "Content-Type": "application/json" } });
   }
