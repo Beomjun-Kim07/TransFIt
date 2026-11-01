@@ -13,14 +13,15 @@ THE해커톤 CAMPUS 5조(김범준·조연준) 프로젝트. 네이버 지도 �
 plan.md                      설계·원본 해부·실험 결과 (매뉴얼 5.3 양식)
 docs/api.yaml                mitmproxy2swagger 산출물 (네이버 비공개 API 명세, 참고용)
 docs/navermap_screenshot/    네이버 지도 앱 캡처 26장
-supabase/schema.sql          테이블 v2 (users/routes/segments/trips/notifications/trip_alerts/dispatch_log, RLS, 가입 트리거, trips.excluded·ride_train·ride_veh, segments.stop_names, users.alight_alerts)
+supabase/schema.sql          테이블 v2 (users/routes/segments/trips/trip_events/notifications/trip_alerts/dispatch_log, RLS, 가입 트리거, trips.excluded·ride_train·ride_veh, segments.stop_names, users.alight_alerts)
 supabase/functions/route/    Edge Function: 카카오 길찾기 대리 호출 + 버스 arsId(getStationByPos). 배포됨
-supabase/functions/telegram/ Edge Function: 텔레그램 웹훅 (/start 연결 코드, trip:<단계>:<id> 버튼 → trips). 배포·setWebhook 완료
+supabase/functions/telegram/ Edge Function: 텔레그램 웹훅 (/start 연결 코드, trip:ev:<trip>:<seg>:<kind> 버튼 → trip_events, 옛 trip:<컬럼>:<id>도). 배포·setWebhook 완료
 supabase/functions/places/   Edge Function: 장소 자동완성 GET ?q= → [{name,address,x,y,category}] (헤더 없이 fetch)
-supabase/functions/trip/     Edge Function: 단축어·앱용 trips 기록 API (users.api_token, docs/shortcuts.md). 탑승 단계면 탄 차 저장 (웹앱도 탑승 기록 뒤 부름)
+supabase/functions/trip/     Edge Function: 단축어·앱용 기록 API (users.api_token, docs/shortcuts.md). seg_index+kind 또는 옛 step. 탑승이면 탄 차 저장 (웹앱도 탑승 기록 뒤 부름)
 supabase/functions/tick/     Edge Function: pg_cron 매분 — 이동 중 카드 고쳐 쓰기, 하차 알림(새 메시지), GitHub 깨우기(watch.yml dispatch)
 supabase/functions/_shared/  realtime.ts(실시간 지하철·버스, 탈 차 boardingVehicle, 하차 정거장 rideStops) · trip_message.ts(이동 중 카드) · alight.ts(하차 알림 판단·추정·문구)
-                             *_test.ts (deno test), testdata/ = 실제 API 응답 샘플(11/01 16:47·16:49, 키 없음)
+                             steps.ts(기록 단계: segments → 단계 목록, trip_events ↔ 옛 컬럼, 진행 상황, 콜백)
+                             *_test.ts (deno test), testdata/ = 실제 API 응답 샘플(11/01 16:47·16:49, 키 없음) + trip_events_flow.json(환승 2번, test_watch.py와 공유)
 watch.py, test_watch.py      GitHub Actions가 10분마다 실행. Supabase 읽기 → 출발 시각 역산 → 실시간 지하철·버스 → 텔레그램 → notifications 기록
 report.py                    매일 23:50 KST 알림 수첩 (docs/notebook.md 커밋, .github/workflows/report.yml)
 android/                     조연준 Kotlin·Compose 앱: 지오펜스 자동 기록(집·승차 역·목적지), 분위수·정체 감지·걷기 개인화, 카카오 길찾기·실시간 지하철.
@@ -46,9 +47,10 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
 - 실시간 버스: `getStationByUid`, 남은 시간은 `traTime1`/`traTime2`(초) (`exps1`·`mkTm`은 이 서비스에 없음).
 - 버스 구간 저장: `station_from` = 승차 arsId, `station_to` = 하차 arsIdTo (route 응답 `steps[].arsId`/`arsIdTo`), 정류장 이름은 `line` 괄호에 — 예: `11211` / `11234` / `1142 (노원역1번출구→노원구청)`. watch.py는 station_from의 5자리로 조회하고 `route_match`가 line에서 노선 번호만 본다. 승차 번호를 못 찾으면 station_from/to에 이름을 두고 watch.py가 이름으로 찾는다.
 - 카카오 길찾기 단위: `time`/`totalTime` 초, `distance` m. route 응답 `steps[].stops` = 정거장 이름 목록(승차·하차 포함) → 웹 저장 때 `segments.stop_names`.
+- 기록 단계 (`_shared/steps.ts` · 웹 `tripSteps`, plan.md "기록 단계"): 경로 segments에서 출발 → 첫 탈것 승강장 도착 → 탑승 → 하차 → 다음 탑승 … → 목적지 도착(마지막 하차와 합침), 이름 "계양 하차"·"공항철도 탑승". 저장은 `trip_events(trip_id, seg_index, kind platform|board|alight, at)` — 환승 횟수 제한 없음. **옛 컬럼은 첫 값만 같이 채움**(첫 탈 구간 승강장·탑승·하차 → platform_at·boarded_at·transfer_off_at, 두 번째 탑승 → transfer_on_at) → watch.py·report.py·개인 첫 도보 그대로. trip_events 없는 기록은 옛 컬럼을 단계로 읽는다.
 - 하차 알림 (tick 매분, `_shared/alight.ts`, plan.md "하차 알림"): 탑승 중 하차 지점까지 남은 정거장 2·1·0에 `sendMessage` 새 메시지, 지금 단계 하나만(2→0이면 0만). 셈은 지하철식(1 = 다음 역이 하차역): 지하철 `arvlCd` 0·1→0, 3·4·5→1, "[N]번째 전역"/`ordkey`→N. **버스 "[N번째 전]"은 N+1, "곧 도착"은 1** (실측: 버스 N = 지나야 할 정류장 수). 탄 차 = 탑승 버튼 때 `boardingVehicle(boarded)` → `trips.ride_train`/`ride_veh`. 못 잡으면 `stop_names` 비례 추정 "(추정)". 중복 = `trip_alerts` 유니크 insert-ignore. 끄기 = `users.alight_alerts`('2,1,0').
 
-## 지금 상태 (2026-11-01 17:10)
+## 지금 상태 (2026-11-01 18:30)
 - 완료: 1 커밋·push, 2 plan.md 원본 해부(캡처·api.yaml·대응표), 3 도보·환승 역설계 실험, 4 테이블 v2, 5 watch.py 로컬·Actions 실행 성공, 6 Secrets, 7 웹앱 1차(로그인·가입 동작 확인)
   - A `e75da7f`: route 함수 버스 arsId/arsIdTo(getStationByPos), telegram 웹훅(/start 연결, 역사 안 버튼 → trips, secret 검증) — 둘 다 배포, setWebhook 등록
   - A `c74ce7a`: trip 함수(단축어·앱용 trips 기록 API, users.api_token, docs/shortcuts.md). A `cbdf55d`: places 함수(장소 자동완성), route 좌표 입력(fromX/fromY/toX/toY)
@@ -64,6 +66,7 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
   - C: 길찾기 저장 때 경로의 `originIsStop`/`destIsStop`(A `14d8261`~)이면 "집에서 정류장까지"·"정류장에서 목적지까지" 걷는 분을 스테퍼(기본 5분)로 물어 kind 'walk'·distance_m null 구간을 맨 앞/뒤에 넣고 baseline_sec에 더함(0분이면 안 넣음). route가 붙인 `added:true` 도보는 일반 도보로 저장, 결과 상세에 "(카카오 미제공 · 추정)"
   - 조연준 `b32df54`: 안드로이드 앱 `android/` — main 병합 `80671eb`
   - D 하차 알림 (브랜치 `claude/alight-alerts-feature-3w2dfu`, A·B·C 영역을 한 세션이 맡음 → PR): tick이 탑승 중 매분 하차 지점(환승역·정류장, 최종 하차)까지 남은 정거장을 구해 2정거장 전·1정거장 전·도착에 텔레그램 새 메시지. 실시간(지하철 `arvlCd`·`arvlMsg2`·`ordkey`, 버스 `arrmsg` "[N번째 전]"+1) → 못 잡으면 `stop_names` 비례 추정 "(추정)". `trip_alerts` 중복 방지, `users.alight_alerts` + 웹 설정 스위치 3개, 탑승 버튼(텔레그램·trip 함수·웹→trip 함수) 때 탄 차를 `ride_train`/`ride_veh`에 저장, 이동 중 카드에 "🚏 노원 하차까지 2정거장", route `steps[].stops` → 웹 저장 `stop_names`, 경로 상세에 "N개 역". 테스트: `alight_test.ts` 16개(실제 응답 testdata), realtime_test 21개, test_watch.py 80 OK(실제 DB 시험 2곳은 service 키 없는 환경이라 건너뜀). **대기: SQL(사용자, PR 본문), 함수 배포 tick·telegram·trip·route(사용자 확인 후)**
+  - E 기록 단계 trip_events (같은 브랜치·PR, 환승 횟수 제한 없음): 단계 목록을 segments에서 만들고("계양 하차"·"공항철도 탑승"·"서울역 하차"·"4호선 탑승", 마지막 하차 = 목적지 도착) `trip_events`에 기록. 웹 홈 큰 버튼·되돌리기·기록 상세, 텔레그램 `trip:ev:<trip>:<seg>:<kind>`(옛 형식도), tick 카드("🔄 환승 이동 · 다음 4호선"), trip 함수 `seg_index`+`kind`(옛 `step`도), 하차 알림 세 번째 탈 구간까지. 옛 컬럼 첫 값만 같이 채움. telegram 🏁 메시지 "예상 없음" 버그(로컬 estimateDuration이 [초, 근거]를 돌려줌) 같이 고침. 테스트: steps_test 9개, alight_test 16개, realtime_test 21개, test_watch.py 88 OK(+8: 같은 픽스처로 watch.py·report.py·개인 첫 도보), 로컬 Postgres 16에서 SQL(옛 main 스키마 + 기록 → 옮기기 1·2회, RLS) 확인. **대기: SQL 2개(하차 알림·기록 단계, 사용자), 함수 배포, push·PR(GitHub 403)**
   - **웹앱 배포: https://transfit-web.vercel.app** (Vercel GitHub 연동, Root Directory `web`, main push마다 자동 재배포. 배포본 = 저장소 `web/index.html` 확인)
   - README: 소개·배포 URL·데이터 출처. 저장소에 비밀 키·HAR 없음 확인 (공개 키 `web/config.js`, 채팅 ID만 있음)
   - 버스 정류소정보조회 승인 확인 (실제 호출 정상)
@@ -73,8 +76,8 @@ web/manifest.json, web/*.png   PWA(홈 화면 추가, "T" 아이콘 192·512·18
 - **A (함수)**: 탑승 버튼 때 탄 차 저장·탑승 중 하차 지점 실시간은 D 하차 알림으로 끝남(SQL·배포 대기). 남은 것: `firstWalkSec`(개인 첫 도보)를 `_shared/trip_message.ts` 이동 중 카드에 연결, `rideEta`로 이동 중 카드 도착 예상 보정.
 - **B (알림)**: watch.yml cron을 `'17,47 * * * *'`(30분 보험, 평소엔 tick이 workflow_dispatch로 깨움)로, Actions 조회는 `GH_DISPATCH_TOKEN` 사용. **11/01 확인: 아직 안 됨** — watch.yml은 `3-59/10` 그대로, tick엔 dispatch만 있고 실행 조회 코드 없음.
 - **사용자**: B cron 변경이 push된 뒤 저장소 private 전환 → 키 교체(SUPABASE secret, KAKAO, TELEGRAM_SECRET, GH_DISPATCH_TOKEN, BOT_TOKEN). 순서·넣을 곳은 A가 체크리스트로 제공.
-- **사용자 폰 확인** (https://transfit-web.vercel.app): ① 구간 수정 저장(출발 기준 갱신 확인 포함) ② 기록 탭 상세 스와이프 뒤로가기 ③ 정류장·역에서 출발/도착하는 경로 저장 때 걷는 시간 시트(저장 뒤 홈 예상 분이 고른 분만큼 늘어나는지) ④ 하차 알림: SQL·배포 뒤 경로를 **다시 저장**(정거장 목록 `stop_names`는 새로 저장한 경로부터 들어감) → 텔레그램 탑승 버튼 → 2정거장 전·다음 역·도착 새 메시지가 한 번씩 오는지, 설정 탭 스위치로 끈 단계가 안 오는지.
-- **조연준**: 안드로이드 앱 → `trip` 함수(api_token) 연동, `feat/android-app` 브랜치.
+- **사용자 폰 확인** (https://transfit-web.vercel.app): ① 구간 수정 저장(출발 기준 갱신 확인 포함) ② 기록 탭 상세 스와이프 뒤로가기 ③ 정류장·역에서 출발/도착하는 경로 저장 때 걷는 시간 시트(저장 뒤 홈 예상 분이 고른 분만큼 늘어나는지) ④ 하차 알림: SQL·배포 뒤 경로를 **다시 저장**(정거장 목록 `stop_names`는 새로 저장한 경로부터 들어감) → 텔레그램 탑승 버튼 → 2정거장 전·다음 역·도착 새 메시지가 한 번씩 오는지, 설정 탭 스위치로 끈 단계가 안 오는지 ⑤ 환승 2번 경로(인천1→공항철도→4호선)에서 큰 버튼이 "계양 하차 → 공항철도 탑승 → 서울역 하차 → 4호선 탑승 → 목적지 도착"으로 끝까지 가는지, ··· 되돌리기, 기록 탭 상세 줄.
+- **조연준**: 안드로이드 앱 → `trip` 함수(api_token) 연동, `feat/android-app` 브랜치. 환승 2번 이상이면 `step` 대신 `seg_index`+`kind`(docs/shortcuts.md), 응답 `next`를 다음 요청에 그대로.
 - **결정 대기**: 웹앱 자체 알림(텔레그램 없이) — 할지 말지.
 - 이전 목록에서 넘어온 것: Supabase Site URL 등록(사용자) · 반복 방지 검사(아래 5) · watch.py/telegram `baseline_src` 근거 문구(B·A, 아직 코드에 없음. 컬럼은 D SQL에 `if not exists`로 포함, schema.sql 반영됨) · plan.md 나머지·1분 발표 대본(C).
 

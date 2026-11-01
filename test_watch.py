@@ -336,6 +336,29 @@ late = [dict(five_before[0], started_at="2026-10-29T22:00:00+00:00", ended_at="2
 x = report.build_rows(R, [], N[:1], five_before + late)[0]
 ok(f"{x['depart']:%H:%M}" == "08:00", "예상 출발은 그 알림 전까지 끝난 기록 5회(60분)로 다시 계산 — 알림 뒤 도착은 안 셈")
 
+print("== trip_events 흐름 (환승 2번): 옛 컬럼 첫 값만 → watch.py·report.py·개인 첫 도보 그대로")
+# 픽스처 = supabase/functions/_shared/testdata/trip_events_flow.json. steps_test.ts가 버튼을 끝까지 누르면 trips가 expected_columns가 되는지 확인하고,
+# 여기선 그 행(trip_events가 붙어 와도)으로 watch.py·report.py 계산이 예전과 똑같이 도는지 본다.
+import json
+from datetime import timedelta as _td
+FLOW = json.load(open(os.path.join(HERE, "supabase", "functions", "_shared", "testdata", "trip_events_flow.json"), encoding="utf-8"))
+f_row = dict(FLOW["trip"], **FLOW["expected_columns"],
+             trip_events=[{"seg_index": p["seg_index"], "kind": p["kind"], "at": p["at"]} for p in FLOW["presses"] if "seg_index" in p])
+shift = lambda row, days: {k: (w.parse_ts(v) - _td(days=days)).isoformat() if k.endswith("_at") and v else v for k, v in row.items()}
+f_trips = [f_row, shift(f_row, 1), shift(f_row, 2)]                    # 사흘 같은 시각에 같은 흐름
+f_now = w.parse_ts(FLOW["expected_columns"]["ended_at"]) + _td(hours=1)
+f_segs, f_route = FLOW["segments"], FLOW["route"]
+ok(w.walk_samples(f_trips, f_now) == [420.0] * 3, f"개인 첫 도보 표본 = started_at→platform_at 7분 ×3 ({w.walk_samples(f_trips, f_now)})")
+ok(w.first_walk_sec(f_segs, f_trips, f_now) == (420, 3, True), f"첫 승차 지점까지 = 내 기록 7분 (구간 예상도 7분) {w.first_walk_sec(f_segs, f_trips, f_now)}")
+ok(w.first_walk_sec(f_segs, [dict(r, platform_at=None) for r in f_trips], f_now) == (420, 0, False), "platform_at이 비면 구간 예상 (옛 컬럼 호환이 끊기면 개인값이 사라진다)")
+ok(w.usable_durations(f_trips) == [3960.0] * 3, "소요 = started_at→ended_at 66분 (환승 수와 무관)")
+ok(w.estimate_duration(f_route, f_segs, f_trips) == (4020, "카카오 예상 기준(기록 쌓이면 바뀜)"), "기록 3회 < 5회 → 카카오 기준")
+ok(w.estimate_duration(f_route, f_segs, f_trips + [shift(f_row, d) for d in (3, 4)])[0] == 3960, "기록 5회 → 개인 90% 66분")
+f_N = [{"route_id": 9, "date": "2026-11-01", "kind": "pre", "sent_at": "2026-10-31T22:20:00+00:00"}]   # 11/01 07:20 KST
+f_rows = report.build_rows([f_route], [dict(x, route_id=9) for x in f_segs], f_N, f_trips)
+ok(len(f_rows) == 1 and f"{f_rows[0]['actual']:%H:%M}" == "07:30", f"알림 수첩: 실제 출발 07:30 ({f_rows[0].get('actual')})")
+ok("| 2026-11-01 | 경로 #9 | pre | 07:20 |" in report.render(f_rows), "수첩 표 한 줄")
+
 print("== 실제 DB: trips 조회 (excluded 컬럼이 아직 없어도 실패하지 않아야)")
 from datetime import timedelta
 rows = w.fetch_trips(1, (now - timedelta(days=w.LOOKBACK_DAYS)).isoformat())

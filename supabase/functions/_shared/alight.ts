@@ -1,6 +1,6 @@
 // supabase/functions/_shared/alight.ts — 이동 중 하차 알림. tick이 매분 부르고(새 메시지로 발송), 이동 중 카드에도 한 줄 보인다.
 //
-// 언제: 탑승 중에만 — boarded_at 뒤 환승 하차 전이면 첫 탈 구간, transfer_on_at 뒤면 두 번째 탈 구간.
+// 언제: 탑승 중에만 — 마지막으로 찍힌 단계가 어떤 탈 구간의 '탑승'일 때 그 구간 (trip_events, 환승 횟수 제한 없음 — _shared/steps.ts).
 // 무엇을: 그 구간의 하차 지점(환승역·환승 정류장, 마지막 구간이면 최종 하차 지점)까지 남은 정거장 level
 //   2 → "🔔 2정거장 뒤 노원 하차 · 7호선 환승"
 //   1 → "🔔 다음 역 노원, 내릴 준비"                       (버스는 "다음 정류장")
@@ -16,8 +16,9 @@
 // 보내는 규칙 (pickAlert): 지금 level 하나만 — 2에서 0으로 건너뛰면 0만. 같은·더 가까운 단계를 이미 보냈으면 안 보냄,
 //   users.alight_alerts('2,1,0')에서 끈 단계도 안 보냄. 동시 실행 중복은 tick이 trip_alerts(trip_id, seg_index, kind) 유니크로 막는다.
 
-import { rideStops, subwayHeading, boardingVehicle, isRide, normStation, lineLabel, busLabel, stopName, placeOf, SEC_PER_STATION,
+import { rideStops, subwayHeading, boardingVehicle, isRide, normStation, placeOf, SEC_PER_STATION,
   type Seg, type Env, type Ride, type RideStops } from "./realtime.ts";
+import { progress, rideName, toName } from "./steps.ts";
 
 // deno-lint-ignore no-explicit-any
 type Trip = Record<string, any>;
@@ -30,7 +31,6 @@ export const LIVE_FROM_STOPS = 3;             //   추정 남은 정거장이 �
 export const ESTIMATE_GRACE_SEC = 5 * 60;     // 추정: 예상 승차 시간 + 5분이 지나면 알림 안 함
 export const STALE_SEC = 4 * 60;              // 실시간 자료가 이보다 오래됐으면 안 믿음
 export const PASSED_MEMORY_MS = 10 * 60_000;  // 1정거장 안으로 보였던 차가 사라지면 10분 동안 '지남'으로 본다
-const BUS_LINE_RE = /^\s*(.*?)\s*\((.*)\)\s*$/;   // '1142 (노원역1번출구→노원구청)'
 
 // ---------- 설정 ----------
 /** users.alight_alerts('2,1,0') → {2,1,0}. null·undefined(컬럼 없음)면 전부 켬, ''면 전부 끔. */
@@ -41,42 +41,26 @@ export function alertPrefs(v: unknown): Set<number> {
 export const prefsText = (s: Set<number>) => ALERT_LEVELS.filter((k) => s.has(k)).join(",");
 
 // ---------- 지금 탄 구간 ----------
-export const rideIndexes = (segments: Seg[]) => segments.map((s, i) => isRide(s) ? i : -1).filter((i) => i >= 0);
-/** 탑승 단계 → 그때 타는 구간 index. boarded_at = 첫 탈 구간, transfer_on_at = 두 번째. 탑승 단계가 아니거나 없으면 -1. */
-export function rideIndexFor(field: string, segments: Seg[]) {
-  const r = rideIndexes(segments);
-  return field === "boarded_at" ? r[0] ?? -1 : field === "transfer_on_at" ? r[1] ?? -1 : -1;
-}
-/** 지금 타고 있는 구간과 탄 시각. 탑승 중이 아니면 null. */
+/** 지금 타고 있는 구간과 탄 시각 (마지막으로 찍힌 단계가 '탑승'일 때). 탑승 중이 아니면 null. */
 export function currentRide(t: Trip, segments: Seg[]): { index: number; since: string } | null {
   if (t.ended_at) return null;
-  if (t.transfer_on_at) {
-    const i = rideIndexFor("transfer_on_at", segments);
-    return i >= 0 ? { index: i, since: t.transfer_on_at } : null;
-  }
-  if (t.transfer_off_at || !t.boarded_at) return null;
-  const i = rideIndexFor("boarded_at", segments);
-  return i >= 0 ? { index: i, since: t.boarded_at } : null;
+  const p = progress(t, segments);
+  return p.state === "ride" && p.since ? { index: p.seg, since: p.since } : null;
 }
-/** 탑승 버튼 순간 탄 차 → trips에 넣을 { ride_veh, ride_train } (못 정하면 둘 다 null — 앞 구간 차를 지운다).
- *  탑승 단계(boarded_at·transfer_on_at)가 아니면 null. */
-export async function rideOnBoard(field: string, segments: Seg[], env: Env): Promise<{ ride_veh: string | null; ride_train: string | null } | null> {
-  const i = rideIndexFor(field, segments);
-  if (i < 0) return null;
-  const r = await boardingVehicle(segments[i], env, { boarded: true });
+/** 탑승을 기록한 순간 그 구간(segIndex)에서 탄 차 → trips에 넣을 { ride_veh, ride_train } (못 정하면 둘 다 null — 앞 구간 차를 지운다).
+ *  탈 구간이 아니면 null. */
+export async function rideOnBoard(segIndex: number, segments: Seg[], env: Env): Promise<{ ride_veh: string | null; ride_train: string | null } | null> {
+  const seg = segments[segIndex];
+  if (!seg || !isRide(seg)) return null;
+  const r = await boardingVehicle(seg, env, { boarded: true });
   return { ride_veh: r.vehId ?? null, ride_train: r.trainNo ?? null };
 }
 
 // ---------- 이름 ----------
-/** 하차 지점 이름: 지하철 '노원', 버스는 line 괄호의 하차 정류장 이름 ('노원구청'). */
+/** 하차 지점 이름: 지하철 '노원'·'서울역', 버스는 line 괄호의 하차 정류장 이름 ('노원구청'). */
 export function alightPlace(seg: Seg) {
-  if (seg.kind === "subway") return normStation(seg.station_to) || "하차역";
-  const m = BUS_LINE_RE.exec(seg.line ?? "");
-  const name = m ? (m[2].split("→")[1] ?? "").trim() : "";
-  if (name && name !== "?") return name;
-  return stopName(seg.station_to) || (seg.station_to ? `${seg.station_to}번 정류장` : "하차 정류장");
+  return toName(seg) || (seg.kind === "subway" ? "하차역" : "하차 정류장");
 }
-const rideName = (seg: Seg) => seg.kind === "bus" ? busLabel(seg) : lineLabel(seg.line);
 /** index 다음의 탈 구간과 그 사이 도보·환승 예상(초). 다음 탈 구간이 없으면 seg null, walkSec = 목적지까지 도보. */
 export function nextRide(segments: Seg[], index: number): { seg: Seg | null; index: number; walkSec: number } {
   let walk = 0;

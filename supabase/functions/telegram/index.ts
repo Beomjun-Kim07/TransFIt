@@ -4,22 +4,21 @@
 // 처리하는 것
 //  1. `/start <link_code>`  → users.link_code로 사용자를 찾아 telegram_chat_id 저장 → "연결됐어요" 답장
 //  2. `/next` → 내 경로 전부의 오늘 출발 시각 (watch.py estimate_duration과 같은 계산, 실시간 보정은 없음)
-//  3. callback_query (역사 안 버튼) → trips 에 시각 기록
-//     버튼 data 형식 (watch.py가 inline_keyboard로 보낼 때 이 형식을 쓴다):
-//       trip:start:<route_id>        집 출발 → trips 행 새로 만들고(started_at=now) 다음 버튼 보냄
-//       trip:platform_at:<trip_id>   승강장 도착
-//       trip:boarded_at:<trip_id>    열차 탑승
-//       trip:transfer_off_at:<trip_id> 환승역 하차
-//       trip:transfer_on_at:<trip_id>  환승 열차 탑승
-//       trip:ended_at:<trip_id>      목적지 도착
-//     탑승(boarded_at)·환승 탑승(transfer_on_at)을 처음 기록하면 그 순간 탄 차를 정해(_shared/alight.ts rideOnBoard →
-//     realtime.ts boardingVehicle boarded) trips.ride_train(지하철 btrainNo)·ride_veh(버스 vehId)에 넣는다 — tick 하차 알림이 이 차를 따라간다.
-//     못 정하면 둘 다 null (앞 구간 차를 지움 → 하차 알림은 추정).
+//  3. callback_query (역사 안 버튼) → 단계 기록 (_shared/steps.ts, 환승 횟수 제한 없음)
+//     버튼 data 형식:
+//       trip:start:<route_id>                  집 출발 → trips 행 새로 만들고(started_at=now) 다음 버튼 보냄 (watch.py pre 알림 버튼)
+//       trip:ev:<trip_id>:<seg_index>:<kind>   kind = platform(승강장·정류장 도착) | board(탑승) | alight(하차) → trip_events
+//       trip:ended_at:<trip_id>                목적지 도착 (마지막 하차와 같음) → trips.ended_at
+//       옛 형식 trip:<platform_at|boarded_at|transfer_off_at|transfer_on_at>:<trip_id>도 받는다 → 첫·두 번째 탈 구간 단계로 바꿔 기록
+//     trip_events에 넣으면서 옛 컬럼(platform_at·boarded_at·transfer_off_at·transfer_on_at)은 첫 값만 같이 채운다 (watch.py·개인 도보용).
+//     탑승(board)을 처음 기록하면 그 순간 탄 차를 정해(_shared/alight.ts rideOnBoard → realtime.ts boardingVehicle boarded)
+//     trips.ride_train(지하철 btrainNo)·ride_veh(버스 vehId)에 넣는다 — tick 하차 알림이 이 차를 따라간다. 못 정하면 둘 다 null.
 //
 // 환경변수: BOT_TOKEN, TELEGRAM_SECRET(웹훅 검증), SUPABASE_URL·SUPABASE_SERVICE_ROLE_KEY(자동 주입)
 
-import { liveMessage, finalMessage, estimateDuration, TRIP_FIELDS, LOOKBACK_DAYS, type Trip } from "../_shared/trip_message.ts";
+import { liveMessage, finalMessage, type Trip } from "../_shared/trip_message.ts";   // estimateDuration·LOOKBACK_DAYS는 아래 /next용 것을 쓴다
 import { rideOnBoard } from "../_shared/alight.ts";
+import { parseCallback, legacyStep, recordEvent, stepLabel, withEvents, rideIndexes, EV_KINDS, type EvKind } from "../_shared/steps.ts";
 
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
 const SUBWAY_KEY = Deno.env.get("SUBWAY_KEY") ?? "";
@@ -31,12 +30,12 @@ const TG = `https://api.telegram.org/bot${BOT}`;
 
 
 // ---------- Supabase (PostgREST, service_role) ----------
-async function db(method: string, path: string, body?: unknown) {
+async function db(method: string, path: string, body?: unknown, prefer = "return=representation") {
   const r = await fetch(`${SB_URL}/rest/v1/${path}`, {
     method,
     headers: {
       apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`,
-      "Content-Type": "application/json", Prefer: "return=representation",
+      "Content-Type": "application/json", Prefer: prefer,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -144,42 +143,51 @@ async function onMessage(m: any): Promise<string | void> {
   await reply(chat_id, `연결됐어요 ✅\n${u.email ?? ""}\n이제 출발 시각 알림을 여기로 보내드려요.`);
 }
 
-// ---------- 버튼: trip:<field>:<id> ----------
+// ---------- 버튼 ----------
 // start → trips 행 만들고 이동 중 메시지(tick과 같은 포맷)를 보내 live_msg_id 저장.
-// 그 외 → 시각 기록 후 그 메시지를 즉시 고쳐 쓴다 (새 메시지 없음). 콜백 응답은 토스트.
+// 그 외 → 단계 기록 후 그 메시지를 즉시 고쳐 쓴다 (새 메시지 없음). 콜백 응답은 토스트.
 const SELECT = "*,routes(id,name,arrive_by,confidence,baseline_sec,fallback_min)";
+const getTrip = (q: string) => withEvents((ev) => db("GET", `trips?${q}&select=${SELECT}${ev}`));
 async function onCallback(q: any): Promise<string | void> {
   const chat_id: number = q.message?.chat?.id;
-  const data: string = q.data ?? "";
-  const [kind, field, idStr] = data.split(":");
-  const id = Number(idStr);
+  const cb = parseCallback(q.data ?? "");
   const now = new Date(), nowIso = now.toISOString();
   const toast = (text: string, alert = false) => tg("answerCallbackQuery", { callback_query_id: q.id, text, show_alert: alert });
   try {
-    if (kind !== "trip" || !id) throw new Error("알 수 없는 버튼");
+    if (!cb) throw new Error("알 수 없는 버튼");
     const [user] = await db("GET", `users?telegram_chat_id=eq.${chat_id}&select=id`);
     if (!user) throw new Error("연결된 계정이 없어요");
 
-    let trip: Trip, fresh = false;
-    if (field === "start") {
-      const [open] = await db("GET", `trips?user_id=eq.${user.id}&route_id=eq.${id}&ended_at=is.null&order=started_at.desc&limit=1&select=${SELECT}`);
+    let trip: Trip, segments: any[], boardSeg = -1;
+    if (cb.type === "start") {
+      const [open] = await getTrip(`user_id=eq.${user.id}&route_id=eq.${cb.routeId}&ended_at=is.null&order=started_at.desc&limit=1`);
       if (open && now.getTime() - Date.parse(open.started_at) < 3 * 3600_000) { trip = open; await toast("이미 출발 기록이 있어요"); }
       else {
-        [trip] = await db("POST", `trips?select=${SELECT}`, { user_id: user.id, route_id: id, started_at: nowIso, source: "telegram" });
+        [trip] = await db("POST", `trips?select=${SELECT}`, { user_id: user.id, route_id: cb.routeId, started_at: nowIso, source: "telegram" });
         await toast("출발 기록했어요");
       }
+      segments = await db("GET", `segments?route_id=eq.${trip.route_id}&order=seq`);
     } else {
-      if (!(TRIP_FIELDS as readonly string[]).includes(field)) throw new Error("알 수 없는 단계");
-      const [cur] = await db("GET", `trips?id=eq.${id}&user_id=eq.${user.id}&select=${SELECT}`);
+      const [cur] = await getTrip(`id=eq.${cb.tripId}&user_id=eq.${user.id}`);
       if (!cur) throw new Error("기록을 찾지 못했어요");
-      if (cur[field]) { trip = cur; await toast("이미 기록된 단계예요"); }
-      else { [trip] = await db("PATCH", `trips?id=eq.${id}&select=${SELECT}`, { [field]: nowIso }); fresh = true; await toast(`${field === "ended_at" ? "도착" : "단계"} 기록했어요`); }
+      trip = cur;
+      segments = await db("GET", `segments?route_id=eq.${trip.route_id}&order=seq`);
+      const ev = cb.type === "end" ? { kind: "end", seg: -1 } : cb.type === "legacy" ? legacyStep(cb.field, segments) : { kind: cb.kind, seg: cb.seg };
+      if (!ev) throw new Error("이 경로에 없는 단계예요");
+      if (ev.kind === "end") {
+        if (trip.ended_at) await toast("이미 도착 기록이 있어요");
+        else { [trip] = await withEvents((e) => db("PATCH", `trips?id=eq.${trip.id}&select=${SELECT}${e}`, { ended_at: nowIso })); await toast("도착 기록했어요"); }
+      } else {
+        if (!rideIndexes(segments).includes(ev.seg) || !(EV_KINDS as readonly string[]).includes(ev.kind)) throw new Error("이 경로에 없는 단계예요");
+        const r = await recordEvent(db, trip, segments, ev.seg, ev.kind as EvKind, nowIso);
+        const label = stepLabel(segments, ev.seg, ev.kind as EvKind);
+        await toast(r.fresh ? `${label} 기록했어요` : "이미 기록된 단계예요");
+        if (r.fresh && ev.kind === "board") boardSeg = ev.seg;
+      }
     }
-
-    const segments = await db("GET", `segments?route_id=eq.${trip.route_id}&order=seq`);
-    if (fresh) {   // 탑승·환승 탑승: 탄 차 기록 (ride_veh·ride_train 컬럼이 아직 없으면 실패 — 단계 기록은 그대로)
+    if (boardSeg >= 0) {   // 탑승: 탄 차 기록 (ride_veh·ride_train 컬럼이 아직 없으면 실패 — 단계 기록은 그대로)
       try {
-        const ride = await rideOnBoard(field, segments, { SUBWAY_KEY, BUS_KEY, now });
+        const ride = await rideOnBoard(boardSeg, segments, { SUBWAY_KEY, BUS_KEY, now });
         if (ride) { await db("PATCH", `trips?id=eq.${trip.id}`, ride); Object.assign(trip, ride); }
       } catch (e) { console.error("ride", String(e)); }
     }
@@ -189,7 +197,7 @@ async function onCallback(q: any): Promise<string | void> {
       if (!expected) {
         const sinceIso = new Date(now.getTime() - LOOKBACK_DAYS * 86400_000).toISOString();
         const trips = await db("GET", `trips?route_id=eq.${trip.route_id}&id=neq.${trip.id}&started_at=gte.${encodeURIComponent(sinceIso)}&select=started_at,ended_at,excluded`);
-        expected = estimateDuration(trip.routes, segments, trips);
+        expected = estimateDuration(trip.routes, segments, trips)[0];   // 이 파일의 estimateDuration은 [초, 근거]
       }
       ({ text, markup } = finalMessage(trip, expected));
     } else {

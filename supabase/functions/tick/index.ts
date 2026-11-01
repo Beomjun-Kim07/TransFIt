@@ -1,6 +1,6 @@
 // Supabase Edge Function: tick — 이동 중 안내. pg_cron이 매분 호출한다 (GitHub Actions 안 씀).
 //
-// 대상: 오늘(KST) 시작했고 ended_at이 없고 excluded가 아니며 시작 후 3시간 이내인 trips.
+// 대상: 오늘(KST) 시작했고 ended_at이 없고 excluded가 아니며 시작 후 3시간 이내인 trips. 단계는 trip_events(+옛 컬럼)로 본다.
 // 메시지 내용·단계·버튼은 _shared/trip_message.ts (telegram 함수와 공유), 실시간은 _shared/realtime.ts.
 // 텔레그램은 trip당 메시지 하나: telegram 함수가 start 때 보내고 live_msg_id에 저장 → tick은 고쳐 쓰기만
 // (live_msg_id가 없으면 한 번 보내고 저장). 내용이 같으면 안 고친다.
@@ -14,7 +14,8 @@
 // 호출: POST /tick  (Authorization: Bearer <service_role 또는 sb_secret_ 키>)   ?dry=1 이면 보내지 않고 내용을 응답으로.
 
 import { liveChain, type Seg, type ChainItem } from "../_shared/realtime.ts";
-import { liveMessage, finalMessage, estimateDuration, stageOf, STAGE, dayStartKst, hhmm, LOOKBACK_DAYS, type Trip, type Markup } from "../_shared/trip_message.ts";
+import { liveMessage, finalMessage, estimateDuration, stageText, dayStartKst, hhmm, LOOKBACK_DAYS, type Trip, type Markup } from "../_shared/trip_message.ts";
+import { progress, EVENTS_EMBED } from "../_shared/steps.ts";
 import { alightState, alightMessage, alertPrefs, pickAlert, type AlightState, type LastLive } from "../_shared/alight.ts";
 
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
@@ -64,7 +65,7 @@ function cachedLive(tripId: number, segments: Seg[], now: Date) {
 const alightCache = new Map<number, { at: number; key: string; st: AlightState | null }>();
 const lastLive = new Map<string, LastLive>();
 async function alightFor(t: Trip, segments: Seg[], now: Date) {
-  const key = [t.boarded_at, t.transfer_off_at, t.transfer_on_at, t.ride_train, t.ride_veh].join("|");
+  const key = JSON.stringify([t.trip_events ?? null, t.platform_at, t.boarded_at, t.transfer_off_at, t.transfer_on_at, t.ride_train, t.ride_veh]);
   const c = alightCache.get(t.id);
   if (c && c.key === key && now.getTime() - c.at < 55_000) return c.st;
   const st = await alightState(t, segments, { SUBWAY_KEY, BUS_KEY, now }, { lastLive: (i) => lastLive.get(`${t.id}:${i}`) });
@@ -179,15 +180,18 @@ async function wakeGithub(now: Date, dry: boolean) {
   return rec;
 }
 
-const SELECT = "*,routes(id,name,arrive_by,confidence,baseline_sec,fallback_min),users(telegram_chat_id,alight_alerts)";
-const SELECT_OLD = "*,routes(id,name,arrive_by,confidence,baseline_sec,fallback_min),users(telegram_chat_id)";   // users.alight_alerts SQL 전
-let select = SELECT;
+// trips + 경로 + 사용자(알림 설정) + trip_events. SQL 실행 전이면 없는 것(alight_alerts·trip_events)을 빼고 다시 읽는다.
+const ROUTES = "routes(id,name,arrive_by,confidence,baseline_sec,fallback_min)";
+let users = "users(telegram_chat_id,alight_alerts)", events = `,${EVENTS_EMBED}`;
 async function tripsWhere(q: string) {
-  try { return await db("GET", `trips?select=${select}&${q}`); }
-  catch (e) {
-    if (select !== SELECT || !String(e).includes("alight_alerts")) throw e;
-    select = SELECT_OLD;
-    return await db("GET", `trips?select=${select}&${q}`);
+  for (let i = 0; ; i++) {
+    try { return await db("GET", `trips?select=*,${ROUTES},${users}${events}&${q}`); }
+    catch (e) {
+      const m = String(e);
+      if (i < 2 && events && m.includes("trip_events")) { events = ""; continue; }
+      if (i < 2 && users.includes("alight_alerts") && m.includes("alight_alerts")) { users = "users(telegram_chat_id)"; continue; }
+      throw e;
+    }
   }
 }
 Deno.serve(async (req) => {
@@ -201,10 +205,11 @@ Deno.serve(async (req) => {
   const open = await tripsWhere(`ended_at=is.null&excluded=not.is.true&started_at=gte.${encodeURIComponent(startFloor)}&order=id`);
   for (const t of open) {
     const chatId = t.users?.telegram_chat_id;
-    const rec: any = { trip_id: t.id, route: t.routes?.name, stage: STAGE[stageOf(t)] };
+    const rec: any = { trip_id: t.id, route: t.routes?.name };
     try {
       if (!t.routes) throw new Error("경로 없음");
       const segments: Seg[] = await db("GET", `segments?route_id=eq.${t.route_id}&order=seq`);
+      rec.stage = stageText(progress(t, segments), segments);
       let st: AlightState | null = null;
       try { st = await alightFor(t, segments, now); } catch (e) { rec.alight = { error: String(e) }; }
       const { text, markup } = await liveMessage(t, segments, { SUBWAY_KEY, BUS_KEY, now }, cachedLive(t.id, segments, now), st);

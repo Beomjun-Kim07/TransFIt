@@ -14,6 +14,16 @@ Content-Type: application/json
 {"token": "<설정 탭에서 복사>", "route_id": 1, "step": "platform_at"}
 ```
 
+### 환승이 2번 이상인 경로 (seg_index + kind)
+`step`의 환승 단계는 하나뿐이라(첫 환승) 환승 2번째부터는 `seg_index`와 `kind`로 보냅니다.
+```
+{"token": "…", "route_id": 1, "seg_index": 3, "kind": "alight"}
+```
+- `kind`: `start` · `platform`(첫 탈것 승강장·정류장 도착) · `board`(탑승) · `alight`(하차) · `end`(목적지 도착 = 마지막 하차)
+- `seg_index`: 경로 구간을 순서대로 놓은 0부터 번호 중 **탈 구간** 번호. 예) 도보·인천1호선·환승·공항철도·환승·4호선·도보 → 인천1호선 1, 공항철도 3, 4호선 5.
+  "서울역 하차" = `{"seg_index": 3, "kind": "alight"}`, "4호선 탑승" = `{"seg_index": 5, "kind": "board"}`. 모르면 응답의 `next`를 그대로 다음 요청에 쓰면 됩니다.
+- 옛 `step`도 계속 됩니다: `platform_at` = 첫 탈것 승강장, `boarded_at` = 첫 탑승, `transfer_off_at` = 첫 하차, `transfer_on_at` = 두 번째 탑승.
+
 | step | 뜻 | 텔레그램 메시지 |
 |---|---|---|
 | `start` | 집 출발 (오늘 첫 호출이면 새 기록 생성) | 🚶 출발 기록됨 |
@@ -23,11 +33,15 @@ Content-Type: application/json
 | `transfer_on_at` | 환승 열차 탑승 | 🚇 환승 탑승 기록됨 |
 | `ended_at` | 목적지 도착 (소요시간 계산) | 🏁 도착 기록됨 · 오늘 52분 10초 |
 
+텔레그램 메시지엔 단계 이름이 들어갑니다 (예: "🚇 공항철도 탑승 기록됨 · 경로 이름").
+
 응답:
 ```json
-{"ok": true, "trip_id": 12, "step": "platform_at", "next_step": "boarded_at", "duplicate": false}
+{"ok": true, "trip_id": 12, "step": "platform_at", "seg_index": 1, "kind": "platform", "label": "작전 승강장 도착",
+ "next_step": "boarded_at", "next": {"seg_index": 1, "kind": "board", "label": "인천1호선 탑승"}, "duplicate": false}
 ```
-- `next_step`: 다음에 보낼 단계. `ended_at` 뒤엔 `null`.
+- `next`: 다음에 보낼 단계 (`seg_index`·`kind`·이름). 도착 뒤엔 `null`.
+- `next_step`: 옛 이름으로 다음 단계 (옛 단축어용). `ended_at` 뒤엔 `null`.
 - `duplicate: true`: 이미 적힌 단계를 또 보낸 것. 무시되고 텔레그램도 안 옵니다.
 - `start` 전에 다른 단계를 보내면 `409 {"ok":false,"error":"오늘 시작한 기록이 없어요..."}`.
 - 하루 기준은 한국 시간 0시. 어제 `start`만 하고 `ended_at`을 안 보냈으면 오늘 `start`가 새 기록을 만듭니다.

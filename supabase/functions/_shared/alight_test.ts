@@ -3,7 +3,8 @@
 // 실행: deno test --allow-read supabase/functions/_shared/alight_test.ts
 import { boardingVehicle, busAway, rideStops, subwayAway, subwayHeading, type Env, type Seg } from "./realtime.ts";
 import { alertPrefs, alightLine, alightMessage, alightPlace, alightState, alightText, currentRide, estimateAway, liveLevel, pickAlert,
-  prefsText, rideIndexFor, rideOnBoard, stopList } from "./alight.ts";
+  prefsText, rideOnBoard, stopList } from "./alight.ts";
+import { legacyStep } from "./steps.ts";
 import { liveMessage } from "./trip_message.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -128,12 +129,12 @@ Deno.test("boardingVehicle boarded (실제 응답): 방금 떠난(출발)·도�
   eq(await boardingVehicle(bus("11211", "1138 (노원역1번출구→상계2동주민센터)"), env("a"), { boarded: true }), {}, "1138 '10분후[4번째 전]'뿐 → 못 정함");
 });
 
-Deno.test("rideOnBoard: 탑승 단계 → 그 구간의 탄 차, 못 정하면 null 둘 (앞 구간 차 지움)", async () => {
+Deno.test("rideOnBoard: 탑승한 구간의 탄 차, 못 정하면 null 둘 (앞 구간 차 지움)", async () => {
   const segs: Seg[] = [{ kind: "walk", expected_sec: 300 }, SUB("노원역", "창동역", "4호선"), { kind: "transfer", expected_sec: 240 }, SUB("노원역", "중계역", "7호선")];
-  eq([rideIndexFor("boarded_at", segs), rideIndexFor("transfer_on_at", segs), rideIndexFor("ended_at", segs)], [1, 3, -1]);
-  eq(await rideOnBoard("boarded_at", segs, env("a")), { ride_veh: null, ride_train: "4119" });
-  eq(await rideOnBoard("transfer_on_at", segs, env("a")), { ride_veh: null, ride_train: null });
-  eq(await rideOnBoard("platform_at", segs, env("a")), null);
+  eq([legacyStep("boarded_at", segs)?.seg, legacyStep("transfer_on_at", segs)?.seg], [1, 3], "옛 탑승·환승 탑승 = 첫·두 번째 탈 구간");
+  eq(await rideOnBoard(1, segs, env("a")), { ride_veh: null, ride_train: "4119" });
+  eq(await rideOnBoard(3, segs, env("a")), { ride_veh: null, ride_train: null });
+  eq(await rideOnBoard(0, segs, env("a")), null, "도보 구간");
 });
 
 // ---------- 추정 ----------
