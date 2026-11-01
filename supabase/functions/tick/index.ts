@@ -10,7 +10,7 @@
 // 호출: POST /tick  (Authorization: Bearer <service_role 또는 sb_secret_ 키>)   ?dry=1 이면 보내지 않고 내용을 응답으로.
 
 import { liveChain, type Seg, type ChainItem } from "../_shared/realtime.ts";
-import { liveMessage, finalMessage, estimateDuration, stageOf, STAGE, dayStartKst, LOOKBACK_DAYS, type Trip, type Markup } from "../_shared/trip_message.ts";
+import { liveMessage, finalMessage, estimateDuration, stageOf, STAGE, dayStartKst, hhmm, LOOKBACK_DAYS, type Trip, type Markup } from "../_shared/trip_message.ts";
 
 const BOT = Deno.env.get("BOT_TOKEN") ?? "";
 const SUBWAY_KEY = Deno.env.get("SUBWAY_KEY") ?? "";
@@ -19,6 +19,12 @@ const SB_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const TG = `https://api.telegram.org/bot${BOT}`;
 const MAX_TRIP_SEC = 3 * 3600;
+// GitHub 깨우기: pre/live 알림이 보낼 차례인 경로가 있으면 watch.yml을 workflow_dispatch로 바로 돌린다 (10분 cron을 기다리지 않음)
+const GH_TOKEN = Deno.env.get("GH_DISPATCH_TOKEN") ?? "";
+const GH_REPO = Deno.env.get("GH_REPO") ?? "Beomjun-Kim07/TransFIt";
+const GH_WORKFLOW = Deno.env.get("GH_WORKFLOW") ?? "watch.yml";
+const DISPATCH_GAP_SEC = 4 * 60;          // 한 번 깨운 뒤 4분 안엔 다시 안 깨움 (dispatch_log)
+const LIVE_WINDOW_MIN = 10;               // watch.py LIVE_WINDOW_MIN
 
 async function db(method: string, path: string, body?: unknown) {
   const r = await fetch(`${SB_URL}/rest/v1/${path}`, {
@@ -81,6 +87,55 @@ function authorized(req: Request) {
   return !!token && secretKeys().includes(token);
 }
 
+// ---------- GitHub 깨우기 ----------
+/** watch.py와 같은 조건으로 '지금 보낼 알림이 있나' 판단: pre = depart-lead ≤ now < depart, live = depart±10분. notifications에 오늘 그 kind가 없을 때만. */
+async function dueNotifications(now: Date) {
+  const routes = await db("GET", "routes?select=*,users!inner(telegram_chat_id)&users.telegram_chat_id=not.is.null&order=id");
+  const kstNow = new Date(now.getTime() + 9 * 3600_000);
+  const weekday = (kstNow.getUTCDay() + 6) % 7;                       // 월=0
+  const today = kstNow.toISOString().slice(0, 10);
+  const sent = await db("GET", `notifications?date=eq.${today}&select=route_id,kind`);
+  const sentSet = new Set(sent.map((n: any) => `${n.route_id}:${n.kind}`));
+  const sinceIso = new Date(now.getTime() - LOOKBACK_DAYS * 86400_000).toISOString();
+  const due: { route_id: number; name: string; kind: string; depart: string }[] = [];
+  for (const r of routes) {
+    const days = r.active_days || "MTWTF";
+    if (!(weekday < days.length && days[weekday] !== "-")) continue;
+    const [segments, trips] = await Promise.all([
+      db("GET", `segments?route_id=eq.${r.id}&order=seq&select=expected_sec`),
+      db("GET", `trips?route_id=eq.${r.id}&started_at=gte.${encodeURIComponent(sinceIso)}&select=started_at,ended_at,excluded`),
+    ]);
+    const mins = Math.ceil(estimateDuration(r, segments, trips) / 60);
+    const [hh, mm] = String(r.arrive_by).split(":").map(Number);
+    const depart = dayStartKst(now).getTime() + (hh * 60 + mm - mins) * 60_000;
+    const lead = (r.lead_min || 30) * 60_000, t = now.getTime();
+    if (depart - lead <= t && t < depart && !sentSet.has(`${r.id}:pre`)) due.push({ route_id: r.id, name: r.name, kind: "pre", depart: hhmm(new Date(depart)) });
+    if (depart - LIVE_WINDOW_MIN * 60_000 <= t && t <= depart + LIVE_WINDOW_MIN * 60_000 && !sentSet.has(`${r.id}:live`)) due.push({ route_id: r.id, name: r.name, kind: "live", depart: hhmm(new Date(depart)) });
+  }
+  return due;
+}
+async function wakeGithub(now: Date, dry: boolean) {
+  const rec: any = { github: GH_TOKEN ? "ready" : "GH_DISPATCH_TOKEN 없음" };
+  try {
+    const due = await dueNotifications(now);
+    rec.due = due;
+    if (!due.length) { rec.action = "할 알림 없음"; return rec; }
+    const recent = await db("GET", `dispatch_log?dispatched_at=gte.${encodeURIComponent(new Date(now.getTime() - DISPATCH_GAP_SEC * 1000).toISOString())}&order=dispatched_at.desc&limit=1&select=dispatched_at,route_id,kind`);
+    if (recent.length) { rec.action = `skip: ${Math.round((now.getTime() - Date.parse(recent[0].dispatched_at)) / 1000)}초 전에 깨움 (${DISPATCH_GAP_SEC / 60}분 안 재호출 막음)`; return rec; }
+    if (dry) { rec.action = "dry: 깨웠을 것"; return rec; }
+    if (!GH_TOKEN) { rec.action = "토큰 없어 못 깨움"; return rec; }
+    const r = await fetch(`https://api.github.com/repos/${GH_REPO}/actions/workflows/${GH_WORKFLOW}/dispatches`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
+      body: JSON.stringify({ ref: "main", inputs: { test: "false" } }),
+    });
+    if (r.status !== 204) throw new Error(`GitHub dispatch ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    await db("POST", "dispatch_log", { route_id: due[0].route_id, kind: due[0].kind, dispatched_at: now.toISOString() });
+    rec.action = "dispatched";
+  } catch (e) { rec.error = String(e); console.error("github wake", String(e)); }
+  return rec;
+}
+
 const SELECT = "*,routes(id,name,arrive_by,confidence,baseline_sec,fallback_min),users(telegram_chat_id)";
 Deno.serve(async (req) => {
   if (!authorized(req)) return new Response(JSON.stringify({ error: "service_role 키가 필요해요" }), { status: 401 });
@@ -133,5 +188,7 @@ Deno.serve(async (req) => {
     } catch (e) { rec.error = String(e); console.error(`trip ${t.id} final`, String(e)); }
     out.push(rec);
   }
-  return new Response(JSON.stringify({ at: now.toISOString(), dry, trips: out }, null, 1), { headers: { "Content-Type": "application/json" } });
+  // 3) GitHub 깨우기 (pre/live 알림 차례면 watch.yml 즉시 실행)
+  const wake = await wakeGithub(now, dry);
+  return new Response(JSON.stringify({ at: now.toISOString(), dry, trips: out, wake }, null, 1), { headers: { "Content-Type": "application/json" } });
 });

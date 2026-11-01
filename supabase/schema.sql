@@ -90,12 +90,23 @@ create table notifications (
   unique (route_id, date, kind)
 );
 
+-- 깨우기 기록: tick이 watch.yml을 workflow_dispatch로 돌린 시각 (4분 안 재호출 방지)
+create table dispatch_log (
+  id serial primary key,
+  route_id int references routes(id) on delete set null,
+  kind text,                        -- pre / live (깨운 계기가 된 알림)
+  dispatched_at timestamptz default now()
+);
+-- 기존 DB에 추가할 때 (한 번만):
+-- create table if not exists dispatch_log (id serial primary key, route_id int references routes(id) on delete set null, kind text, dispatched_at timestamptz default now()); alter table dispatch_log enable row level security;
+
 -- 행 단위 접근 제어: 로그인한 사람은 자기 것만. service_role(watch.py, 봇)은 전부.
 alter table users enable row level security;
 alter table routes enable row level security;
 alter table segments enable row level security;
 alter table trips enable row level security;
 alter table notifications enable row level security;
+alter table dispatch_log enable row level security;   -- 정책 없음 = service_role만
 
 create policy "own user" on users for all using (auth.uid() = id) with check (auth.uid() = id);
 create policy "own routes" on routes for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
